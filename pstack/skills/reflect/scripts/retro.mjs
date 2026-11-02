@@ -55,6 +55,8 @@ const RETRO = join(STORE, "retro");
 const ROUNDS = join(RETRO, "rounds");
 const LOCK = join(RETRO, ".lock");
 const GIT_DIR = join(RETRO, ".git");
+// Beside the retro folder, not in it, so nothing there is staged, scanned or taken for an export.
+const TRASH = join(STORE, "retro-trash");
 const BACKUP_STATE = join(GIT_DIR, "retro-backup.json");
 const GITLEAKS_REPORT = join(GIT_DIR, "retro-gitleaks.json");
 const REMOTE_TIMEOUT_MS = 15000;
@@ -761,20 +763,18 @@ function copyVerified(src, dest, sum) {
   renameSync(staged, dest);
 }
 
-// One rename takes an export out of the folder, so a crash mid-delete never leaves a partial export that would be staged or archived.
-// The trash sits inside .git, which nothing stages or scans, and each removal empties it.
+// One rename takes an export out of the retro folder, so a crash mid-delete never leaves a partial export that would be staged or archived.
 function removeExport(dir) {
-  if (!existsSync(GIT_DIR)) return rmSync(dir, { recursive: true, force: true });
-  const trash = join(GIT_DIR, "retro-trash");
-  mkdirSync(trash, { recursive: true });
-  renameSync(dir, unique(join(trash, basename(dir))));
-  rmSync(trash, { recursive: true, force: true });
+  mkdirSync(TRASH, { recursive: true });
+  renameSync(dir, unique(join(TRASH, basename(dir))));
+  rmSync(TRASH, { recursive: true, force: true });
 }
 
 // Every export is copied and verified before any local copy is deleted, and a rerun after a crash at any point converges:
 // a verified archive copy is reused, and an export already gone from the round folder was verified before it went.
 function archiveRound(round) {
   if (!existsSync(ARCHIVE)) refuse(`${ARCHIVE} is missing, so the round's exports have nowhere to go; mount the archive drive or set RETRO_ARCHIVE`);
+  rmSync(TRASH, { recursive: true, force: true });
   const roundDir = join(ROUNDS, round.round);
   const dest = join(ARCHIVE, round.round);
   const exports = findExports(roundDir);
@@ -788,9 +788,18 @@ function archiveRound(round) {
     const file = join(home, "thread.json");
     const rec = existsSync(file) && readRecord(file, []);
     if (!rec) continue;
-    const archived = findExports(home)
-      .map((dir) => ({ dir, target: join(dest, "inputs", id, relative(home, dir)) }))
-      .filter(({ dir, target }) => existsSync(target) && digest(target) === digest(dir));
+    // A trail registered after open has a path of its own, so it is archived beside the round's snapshot.
+    const archived = [];
+    for (const dir of findExports(home)) {
+      const target = join(dest, "inputs", id, relative(home, dir));
+      const sum = digest(dir);
+      if (!existsSync(target)) copyVerified(dir, target, sum);
+      else if (digest(target) !== sum) {
+        console.error(`warning: ${dir} differs from the round's archived copy at ${target}, so it stays here`);
+        continue;
+      }
+      archived.push({ dir, target });
+    }
     if (!archived.length) continue;
     for (const t of rec.trails) {
       const match = archived.find(({ dir }) => t.path === dir);

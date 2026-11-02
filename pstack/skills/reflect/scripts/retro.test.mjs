@@ -1135,17 +1135,22 @@ test("close copies each export to the archive, verifies it and deletes the local
   assert.match(unwritable.err, /cannot copy .*nothing was deleted/);
   untouched("a copy that failed");
 
-  const leftover = join(box.store, "retro", ".git", "retro-trash", "slice2");
+  const leftover = join(box.store, "retro-trash", "slice2");
   mkdirSync(leftover, { recursive: true });
   writeFileSync(join(leftover, "activity.jsonl"), "what a removal cut short leaves\n");
+  box.run(["register", A, "--trail", exportBundle(join(scratchDir(t), "slice2-later"))], "2026-10-30T09:00:00");
+  const laterCopy = box.inRetro(box.record(A).trails.at(-1).path);
+  const laterTrail = join("inputs", A, relative(box.home(A), laterCopy));
   const closed = box.run(["close", "2026-10-29"]);
   assert.equal(closed.code, 0, closed.err);
-  assert.ok(!existsSync(join(box.store, "retro", ".git", "retro-trash")), "removed exports leave nothing behind");
+  assert.ok(!existsSync(join(box.store, "retro-trash")), "removed exports leave nothing behind");
   assert.equal(text(join(dest, trail)), original.trail);
   assert.equal(text(join(dest, input)), original.input);
   assert.ok(existsSync(join(dest, input, "children", "child.jsonl")));
   for (const dir of [join(round, trail), join(round, input), homeCopy]) assert.ok(!existsSync(dir), `${dir} is deleted`);
   assert.ok(existsSync(join(round, "synthesis.md")) && existsSync(join(round, "inputs", A, "thread.json")), "results stay");
+  assert.ok(existsSync(join(dest, laterTrail, "activity.jsonl")), "a trail registered after open is archived too");
+  assert.ok(!existsSync(laterCopy), "and its home copy is deleted");
   assert.equal(roundJson().archive, dest);
   assert.equal(box.record(A).trails[0].archived, join(dest, trail));
   assert.doesNotMatch(box.run(["status"]).out, /## Problems/);
