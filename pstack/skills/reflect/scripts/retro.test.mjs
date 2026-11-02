@@ -1141,6 +1141,11 @@ test("close copies each export to the archive, verifies it and deletes the local
   box.run(["register", A, "--trail", exportBundle(join(scratchDir(t), "slice2-later"))], "2026-10-30T09:00:00");
   const laterCopy = box.inRetro(box.record(A).trails.at(-1).path);
   const laterTrail = join("inputs", A, relative(box.home(A), laterCopy));
+  const procDir = join(scratchDir(t), "process");
+  exportBundle(join(procDir, "child-export"));
+  writeFileSync(join(procDir, "decisions.tsv"), "a result\n");
+  box.run(["register", A, "--trail", procDir], "2026-10-30T10:00:00");
+  const processCopy = box.inRetro(box.record(A).trails.at(-1).path);
   const closed = box.run(["close", "2026-10-29"]);
   assert.equal(closed.code, 0, closed.err);
   assert.ok(!existsSync(join(box.store, "retro-trash")), "removed exports leave nothing behind");
@@ -1151,6 +1156,8 @@ test("close copies each export to the archive, verifies it and deletes the local
   assert.ok(existsSync(join(round, "synthesis.md")) && existsSync(join(round, "inputs", A, "thread.json")), "results stay");
   assert.ok(existsSync(join(dest, laterTrail, "activity.jsonl")), "a trail registered after open is archived too");
   assert.ok(!existsSync(laterCopy), "and its home copy is deleted");
+  assert.ok(existsSync(join(dest, "inputs", A, relative(box.home(A), processCopy), "child-export", "activity.jsonl")), "an export inside a trail is archived");
+  assert.ok(!existsSync(join(processCopy, "child-export")) && existsSync(join(processCopy, "decisions.tsv")), "and the trail's results stay");
   assert.equal(roundJson().archive, dest);
   assert.equal(box.record(A).trails[0].archived, join(dest, trail));
   assert.doesNotMatch(box.run(["status"]).out, /## Problems/);

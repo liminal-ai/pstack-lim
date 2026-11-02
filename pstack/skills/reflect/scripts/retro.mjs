@@ -790,9 +790,9 @@ function archiveRound(round, until) {
     if (!rec) continue;
     // A trail registered after open has a path of its own, so it is archived beside the round's snapshot.
     // One registered after the round closed belongs to a later round.
-    const ours = new Set(rec.trails.filter((t) => new Date(t.at) <= until).map((t) => t.path));
+    const ours = rec.trails.filter((t) => new Date(t.at) <= until).map((t) => t.path);
     const archived = [];
-    for (const dir of findExports(home).filter((d) => ours.has(d))) {
+    for (const dir of findExports(home).filter((d) => ours.some((p) => within(d, p)))) {
       const target = join(dest, "inputs", id, relative(home, dir));
       const sum = digest(dir);
       if (!existsSync(target)) copyVerified(dir, target, sum);
