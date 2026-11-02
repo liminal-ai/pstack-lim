@@ -1187,6 +1187,8 @@ test("archive moves the exports of a round that closed before archiving existed,
   const { round, trail, input, roundJson } = roundWithExports(t, box);
   assert.match(box.run(["archive", "2026-10-29"]).err, /round 2026-10-29 is open; close archives its exports/);
   writeFileSync(join(round, "round.json"), JSON.stringify({ ...roundJson(), closedAt: "2026-10-29T12:00:00-04:00" }));
+  box.run(["register", A, "--trail", exportBundle(join(scratchDir(t), "slice3"))], "2026-11-02T09:00:00");
+  const later = box.inRetro(box.record(A).trails.at(-1).path);
   const moved = box.run(["archive", "2026-10-29"]);
   assert.equal(moved.code, 0, moved.err);
   for (const dir of [trail, input]) {
@@ -1194,6 +1196,7 @@ test("archive moves the exports of a round that closed before archiving existed,
     assert.ok(!existsSync(join(round, dir)));
   }
   assert.equal(roundJson().archive, join(box.archive, "2026-10-29"));
+  assert.ok(existsSync(join(later, "activity.jsonl")), "a trail registered after the round closed stays for a later round");
 });
 
 test("the scan catches Cerebras and xAI proxy keys, and a key only an older unpushed commit held", needsGitleaks, (t) => {

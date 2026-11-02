@@ -772,7 +772,7 @@ function removeExport(dir) {
 
 // Every export is copied and verified before any local copy is deleted, and a rerun after a crash at any point converges:
 // a verified archive copy is reused, and an export already gone from the round folder was verified before it went.
-function archiveRound(round) {
+function archiveRound(round, until) {
   if (!existsSync(ARCHIVE)) refuse(`${ARCHIVE} is missing, so the round's exports have nowhere to go; mount the archive drive or set RETRO_ARCHIVE`);
   rmSync(TRASH, { recursive: true, force: true });
   const roundDir = join(ROUNDS, round.round);
@@ -789,8 +789,10 @@ function archiveRound(round) {
     const rec = existsSync(file) && readRecord(file, []);
     if (!rec) continue;
     // A trail registered after open has a path of its own, so it is archived beside the round's snapshot.
+    // One registered after the round closed belongs to a later round.
+    const ours = new Set(rec.trails.filter((t) => new Date(t.at) <= until).map((t) => t.path));
     const archived = [];
-    for (const dir of findExports(home)) {
+    for (const dir of findExports(home).filter((d) => ours.has(d))) {
       const target = join(dest, "inputs", id, relative(home, dir));
       const sum = digest(dir);
       if (!existsSync(target)) copyVerified(dir, target, sum);
@@ -821,7 +823,7 @@ function cmdClose(args) {
   if (missing.length) refuse(`round ${id} is missing ${missing.join(", ")} in ${join(ROUNDS, id)}`);
   const closedAt = atOrNow(args.at);
   if (closedAt < new Date(round.openedAt)) refuse(`round ${id} opened at ${round.openedAt}; it cannot close before that`);
-  archiveRound(round);
+  archiveRound(round, closedAt);
   round.closedAt = stamp(closedAt);
   writeRecord(file, round);
   save(`close round ${id}`);
@@ -832,7 +834,7 @@ function cmdArchive(args) {
   const id = args._[0];
   const { file, round } = roundRecord(id);
   if (!round.closedAt) refuse(`round ${id} is open; close archives its exports`);
-  archiveRound(round);
+  archiveRound(round, new Date(round.closedAt));
   writeRecord(file, round);
   save(`archive round ${id}`);
   console.log(`round ${id}'s exports are in ${round.archive}`);
