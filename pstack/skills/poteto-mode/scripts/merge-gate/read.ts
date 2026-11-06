@@ -3,13 +3,17 @@ import {
   type HashResult,
   type PlanRef,
   type PrRef,
-  type VerdictFact,
+  type ReviewFact,
+  type AcceptanceFact,
   declaredPlan,
-  findVerdictLine,
-  hasVerdictLine,
+  findAcceptance,
+  findReview,
+  hasOldVerdictLine,
+  hasReviewLine,
   isInstructionFile,
-  parseVerdictBody,
-  parseVerdictLine,
+  parseAcceptance,
+  parseReviewBody,
+  parseReviewLine,
   speaksForRepo,
 } from "./gate.ts";
 import type { Git } from "./git.ts";
@@ -52,17 +56,19 @@ export async function readFacts(
   const mergeBase = git.mergeBase(baseTip, head);
   const currentHash = git.verdictHash(mergeBase, head);
 
-  const found = findVerdictLine(comments.filter(speaksForRepo));
-  let verdict: VerdictFact = {
+  const members = comments.filter(speaksForRepo);
+  const found = findReview(members);
+  let review: ReviewFact = {
     kind: "none",
     ignored: comments
-      .filter((comment) => !speaksForRepo(comment) && hasVerdictLine(comment))
+      .filter((comment) => !speaksForRepo(comment) && hasReviewLine(comment))
       .map(({ author, association, url }) => ({ author, association, url })),
+    oldVerdict:
+      members.filter(hasOldVerdictLine).sort((a, b) => b.id - a.id)[0]?.url ?? null,
   };
   if (found !== null) {
-    const parsed = parseVerdictLine(found.line);
-    const body = parseVerdictBody(found.below);
-    verdict =
+    const parsed = parseReviewLine(found.line);
+    review =
       parsed === null
         ? { kind: "malformed", line: found.line, url: found.url }
         : {
@@ -70,9 +76,18 @@ export async function readFacts(
             ...parsed,
             url: found.url,
             recordedHash: recordedHash(git, remote, parsed.base, parsed.head),
-            ...body,
+            ...parseReviewBody(found.below),
           };
   }
+  const record = findAcceptance(members);
+  const parsedAcceptance =
+    record === null ? null : parseAcceptance(record.line, record.below);
+  const acceptance: AcceptanceFact =
+    record === null
+      ? { kind: "none" }
+      : parsedAcceptance === null
+        ? { kind: "malformed", line: record.line, url: record.url }
+        : { kind: "found", ...parsedAcceptance, url: record.url };
 
   const instructionPaths = git
     .changedPaths(mergeBase, head)
@@ -87,7 +102,8 @@ export async function readFacts(
     comments,
     mergeBase,
     currentHash,
-    verdict,
+    review,
+    acceptance,
     plan,
     accepted: asked.accepted,
     instructionFiles:

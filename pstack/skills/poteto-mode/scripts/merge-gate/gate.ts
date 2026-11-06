@@ -59,26 +59,34 @@ export type HashResult =
   | { readonly ok: true; readonly hash: string }
   | { readonly ok: false; readonly detail: string };
 
-export type VerdictOutcome = "PASS" | "PASS+NOTES" | "FAIL";
-
-export interface IgnoredVerdict {
+export interface IgnoredReview {
   readonly author: string;
   readonly association: AuthorAssociation;
   readonly url: string;
 }
 
-export type BoxStatus = "done" | "n/a" | "skipped" | "changed";
+export type BoxStatus = "done" | "failed" | "n/a" | "skipped";
 
-/** One `box <id>: <status>. <note>` line under a verdict. A changed box's note is `<who accepted the change>, <why>`. */
-export interface VerdictBox {
+/** One `box <id>: <status>. <note>` line under a review. A failed box's note names its issue. */
+export interface ReviewBox {
   readonly id: string;
   readonly status: BoxStatus;
   readonly note: string;
 }
 
-export interface VerdictShortcut {
+export interface ReviewShortcut {
   readonly id: string;
   readonly note: string;
+}
+
+export const SEVERITIES = ["high", "medium", "low"] as const;
+export type Severity = (typeof SEVERITIES)[number];
+
+/** One `issue <n> <severity>: <text>` line under a review. */
+export interface ReviewIssue {
+  readonly n: number;
+  readonly severity: Severity;
+  readonly text: string;
 }
 
 export interface Accepted {
@@ -132,21 +140,58 @@ export interface PlanBoxes {
   readonly ids: readonly string[];
 }
 
-export type VerdictFact =
-  | { readonly kind: "none"; readonly ignored: readonly IgnoredVerdict[] }
+export type ReviewFact =
+  | {
+      readonly kind: "none";
+      readonly ignored: readonly IgnoredReview[];
+      /** The newest repo-member comment with an old `pstack-verdict:` line, which the gate no longer reads. */
+      readonly oldVerdict: string | null;
+    }
   | { readonly kind: "malformed"; readonly line: string; readonly url: string }
   | {
       readonly kind: "found";
-      readonly outcome: VerdictOutcome;
       readonly head: string;
       readonly base: string;
       readonly by: string;
       readonly url: string;
       readonly recordedHash: HashResult;
-      readonly boxes: readonly VerdictBox[];
+      readonly boxes: readonly ReviewBox[];
       readonly unreadBoxLines: readonly string[];
-      readonly shortcuts: readonly VerdictShortcut[];
+      readonly shortcuts: readonly ReviewShortcut[];
       readonly unreadShortcutLines: readonly string[];
+      readonly issues: readonly ReviewIssue[];
+      readonly unreadIssueLines: readonly string[];
+    };
+
+export type Disposition =
+  | { readonly kind: "fixed"; readonly sha: string }
+  | { readonly kind: "stands"; readonly why: string }
+  | { readonly kind: "deferred"; readonly owner: string };
+
+export interface IssueDisposition {
+  readonly n: number;
+  readonly disposition: Disposition;
+}
+
+/** A `box <id>: changed. <earlier bar> to <new bar>, <who>, <why>` line, kept as written. */
+export interface BarChange {
+  readonly id: string;
+  readonly change: string;
+}
+
+export type AcceptanceFact =
+  | { readonly kind: "none" }
+  | { readonly kind: "malformed"; readonly line: string; readonly url: string }
+  | {
+      readonly kind: "found";
+      readonly head: string;
+      readonly review: string;
+      readonly by: string;
+      readonly url: string;
+      readonly checked: string | null;
+      readonly issues: readonly IssueDisposition[];
+      readonly bars: readonly BarChange[];
+      readonly unreadLines: readonly string[];
     };
 
 export interface InstructionFiles {
@@ -165,7 +210,8 @@ export interface Facts {
   readonly comments: readonly IssueComment[];
   readonly mergeBase: string;
   readonly currentHash: HashResult;
-  readonly verdict: VerdictFact;
+  readonly review: ReviewFact;
+  readonly acceptance: AcceptanceFact;
   readonly plan: PlanFact;
   readonly accepted: Acceptances;
   readonly instructionFiles: InstructionFiles | null;
@@ -196,13 +242,25 @@ export interface Evaluation {
   readonly result: Result;
 }
 
-const VERDICT_PREFIX = "pstack-verdict:";
-const VERDICT_LINE =
-  /^pstack-verdict: (PASS\+NOTES|PASS|FAIL) head=([0-9a-f]{40}) base=([0-9a-f]{40}) by=(\S+)$/;
+const REVIEW_PREFIX = "pstack-review:";
+const REVIEW_LINE =
+  /^pstack-review: head=([0-9a-f]{40}) base=([0-9a-f]{40}) by=(\S+)$/;
+const OLD_VERDICT_PREFIX = "pstack-verdict:";
+const ACCEPT_PREFIX = "pstack-accept:";
+const ACCEPT_LINE = /^pstack-accept: head=([0-9a-f]{40}) review=(\S+) by=(\S+)$/;
 export const BOX_ID = /^[a-z]+(?:-\d+)?$/;
 const BOX_LINE =
-  /^(?:[-*] )?box ([a-z]+(?:-\d+)?): (done|n\/a|skipped|changed)(?:\. (.*))?$/;
+  /^(?:[-*] )?box ([a-z]+(?:-\d+)?): (done|failed|n\/a|skipped)(?:\. (.*))?$/;
 const BOX_PREFIX = /^(?:[-*] )?box /;
+const CHANGED_BOX = /^(?:[-*] )?box \S+: changed\b/;
+const FAILED_NOTE = /^issue (\d+)\b/;
+const ISSUE_PREFIX = /^(?:[-*] )?issue /;
+const ISSUE_LINE = /^(?:[-*] )?issue (\d+) (high|medium|low): (\S.*)$/;
+const CHECKED_LINE = /^(?:[-*] )?checked: (\S.*)$/;
+const CHECKED_PREFIX = /^(?:[-*] )?checked:/;
+const DISPOSITION_LINE =
+  /^(?:[-*] )?issue (\d+): (?:fixed in ([0-9a-f]{7,40})|stands\. (\S.*)|deferred to (\S+))$/;
+const BAR_LINE = /^(?:[-*] )?box ([a-z]+(?:-\d+)?): changed\. (\S.*)$/;
 export const SHORTCUT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SHORTCUT_LINE = /^(?:[-*] )?shortcut ([a-z0-9]+(?:-[a-z0-9]+)*): (\S.*)$/;
 const SHORTCUT_PREFIX = /^(?:[-*] )?shortcut\b/i;
@@ -241,7 +299,7 @@ const firstLine = (body: string): string =>
     .find((line) => line !== "")
     ?.slice(0, 120) ?? "(empty comment)";
 
-/** Anyone can comment on a public repo, so a pasted verdict or approval line counts only from someone with a role in it. */
+/** Anyone can comment on a public repo, so a pasted review, acceptance or approval line counts only from someone with a role in it. */
 const SPEAKS_FOR_REPO: ReadonlySet<AuthorAssociation> = new Set([
   "OWNER",
   "MEMBER",
@@ -250,8 +308,12 @@ const SPEAKS_FOR_REPO: ReadonlySet<AuthorAssociation> = new Set([
 export const speaksForRepo = (comment: IssueComment): boolean =>
   SPEAKS_FOR_REPO.has(comment.association);
 
-export const hasVerdictLine = (comment: IssueComment): boolean =>
-  lines(comment.body).some((line) => line.startsWith(VERDICT_PREFIX));
+const hasLine = (comment: IssueComment, prefix: string): boolean =>
+  lines(comment.body).some((line) => line.startsWith(prefix));
+export const hasReviewLine = (comment: IssueComment): boolean =>
+  hasLine(comment, REVIEW_PREFIX);
+export const hasOldVerdictLine = (comment: IssueComment): boolean =>
+  hasLine(comment, OLD_VERDICT_PREFIX);
 
 const isBugbot = (check: HeadCheck): boolean =>
   check.app === "cursor" && check.name.includes("Bugbot");
@@ -260,33 +322,44 @@ const isBugbot = (check: HeadCheck): boolean =>
 const newestFirst = (a: IssueComment, b: IssueComment): number => b.id - a.id;
 
 /**
- * The most recent comment with a verdict line decides; its last such line counts, with the lines below it.
- * An edit can leave an older verdict and its boxes above, and those belong to that older verdict.
+ * The most recent comment with a `prefix` line decides; its last such line counts, with the lines below it.
+ * An edit can leave an older record and its lines above, and those belong to that older record.
  */
-export function findVerdictLine(comments: readonly IssueComment[]): {
+function findRecord(
+  comments: readonly IssueComment[],
+  prefix: typeof REVIEW_PREFIX | typeof ACCEPT_PREFIX
+): {
   readonly line: string;
   readonly below: readonly string[];
   readonly url: string;
 } | null {
   for (const comment of [...comments].sort(newestFirst)) {
     const all = lines(comment.body);
-    const at = all.findLastIndex((line) => line.startsWith(VERDICT_PREFIX));
+    const at = all.findLastIndex((line) => line.startsWith(prefix));
     if (at !== -1)
       return { line: all[at], below: all.slice(at + 1), url: comment.url };
   }
   return null;
 }
+export const findReview = (comments: readonly IssueComment[]) =>
+  findRecord(comments, REVIEW_PREFIX);
+export const findAcceptance = (comments: readonly IssueComment[]) =>
+  findRecord(comments, ACCEPT_PREFIX);
 
-export function parseVerdictBody(below: readonly string[]): {
-  readonly boxes: readonly VerdictBox[];
+export function parseReviewBody(below: readonly string[]): {
+  readonly boxes: readonly ReviewBox[];
   readonly unreadBoxLines: readonly string[];
-  readonly shortcuts: readonly VerdictShortcut[];
+  readonly shortcuts: readonly ReviewShortcut[];
   readonly unreadShortcutLines: readonly string[];
+  readonly issues: readonly ReviewIssue[];
+  readonly unreadIssueLines: readonly string[];
 } {
-  const boxes: VerdictBox[] = [];
+  const boxes: ReviewBox[] = [];
   const unreadBoxLines: string[] = [];
-  const shortcuts: VerdictShortcut[] = [];
+  const shortcuts: ReviewShortcut[] = [];
   const unreadShortcutLines: string[] = [];
+  const issues: ReviewIssue[] = [];
+  const unreadIssueLines: string[] = [];
   for (const line of below.map(readable)) {
     if (BOX_PREFIX.test(line)) {
       const match = BOX_LINE.exec(line);
@@ -301,9 +374,66 @@ export function parseVerdictBody(below: readonly string[]): {
       const match = SHORTCUT_LINE.exec(line);
       if (match === null) unreadShortcutLines.push(line);
       else shortcuts.push({ id: match[1], note: match[2].trim() });
+    } else if (ISSUE_PREFIX.test(line)) {
+      const match = ISSUE_LINE.exec(line);
+      if (match === null) unreadIssueLines.push(line);
+      else
+        issues.push({
+          n: Number(match[1]),
+          severity: match[2] as Severity,
+          text: match[3].trim(),
+        });
     }
   }
-  return { boxes, unreadBoxLines, shortcuts, unreadShortcutLines };
+  return { boxes, unreadBoxLines, shortcuts, unreadShortcutLines, issues, unreadIssueLines };
+}
+
+export function parseReviewLine(line: string): {
+  readonly head: string;
+  readonly base: string;
+  readonly by: string;
+} | null {
+  const match = REVIEW_LINE.exec(line.replace(/\s+/g, " "));
+  return match === null ? null : { head: match[1], base: match[2], by: match[3] };
+}
+
+/** The lead's `pstack-accept:` record; null when its first line does not parse. */
+export function parseAcceptance(
+  line: string,
+  below: readonly string[]
+): Omit<Extract<AcceptanceFact, { kind: "found" }>, "kind" | "url"> | null {
+  const match = ACCEPT_LINE.exec(line.replace(/\s+/g, " "));
+  if (match === null) return null;
+  let checked: string | null = null;
+  const issues: IssueDisposition[] = [];
+  const bars: BarChange[] = [];
+  const unreadLines: string[] = [];
+  for (const entry of below.map(readable)) {
+    if (CHECKED_PREFIX.test(entry)) {
+      const found = CHECKED_LINE.exec(entry);
+      if (found === null) unreadLines.push(entry);
+      else checked ??= found[1].trim();
+    } else if (ISSUE_PREFIX.test(entry)) {
+      const found = DISPOSITION_LINE.exec(entry);
+      const disposition: Disposition | null =
+        found === null
+          ? null
+          : found[2] !== undefined
+            ? { kind: "fixed", sha: found[2] }
+            : found[3] !== undefined
+              ? { kind: "stands", why: found[3].trim() }
+              : isDeferOwner(found[4])
+                ? { kind: "deferred", owner: found[4] }
+                : null;
+      if (found === null || disposition === null) unreadLines.push(entry);
+      else issues.push({ n: Number(found[1]), disposition });
+    } else if (BOX_PREFIX.test(entry)) {
+      const found = BAR_LINE.exec(entry);
+      if (found === null) unreadLines.push(entry);
+      else bars.push({ id: found[1], change: found[2].trim() });
+    }
+  }
+  return { head: match[1], review: match[2], by: match[3], checked, issues, bars, unreadLines };
 }
 
 /**
@@ -322,40 +452,30 @@ export function declaredPlan(
   return match === null ? { malformed: declared[0] } : { path: match[1], pr: match[2] };
 }
 
-/** Who accepted a changed bar and why, read from the note `<who>, <why>`; null unless both are there. */
-export function barChange(
-  note: string
-): { readonly who: string; readonly why: string } | null {
-  const at = note.indexOf(",");
-  const who = note.slice(0, at).trim();
-  const why = note.slice(at + 1).trim();
-  return at === -1 || who === "" || why === "" ? null : { who, why };
-}
-
 export function strayAcceptances(facts: Facts): string[] {
-  const { verdict, accepted } = facts;
+  const { review, accepted } = facts;
   const notSkipped = (flag: string, ids: readonly string[]): string[] =>
-    verdict.kind !== "found"
+    review.kind !== "found"
       ? []
       : ids
           .filter(
             (id) =>
-              !verdict.boxes.some(
+              !review.boxes.some(
                 (box) => box.id === id && box.status === "skipped"
               )
           )
           .map(
             (id) =>
-              `${flag} ${id}: the verdict (${verdict.url}) does not skip box ${id}`
+              `${flag} ${id}: the review (${review.url}) does not skip box ${id}`
           );
   const shortcuts =
-    verdict.kind !== "found"
+    review.kind !== "found"
       ? []
       : accepted.shortcuts
-          .filter(({ id }) => !verdict.shortcuts.some((s) => s.id === id))
+          .filter(({ id }) => !review.shortcuts.some((s) => s.id === id))
           .map(
             ({ id }) =>
-              `--accept-shortcut ${id}: the verdict (${verdict.url}) lists no shortcut ${id}`
+              `--accept-shortcut ${id}: the review (${review.url}) lists no shortcut ${id}`
           );
   const checks = accepted.checks.flatMap((waiver) => {
     const requirement = REQUIREMENTS.find((r) => r.waiver === waiver.check);
@@ -371,22 +491,6 @@ export function strayAcceptances(facts: Facts): string[] {
     ...shortcuts,
     ...checks,
   ];
-}
-
-export function parseVerdictLine(line: string): {
-  readonly outcome: VerdictOutcome;
-  readonly head: string;
-  readonly base: string;
-  readonly by: string;
-} | null {
-  const match = VERDICT_LINE.exec(line.replace(/\s+/g, " "));
-  if (match === null) return null;
-  return {
-    outcome: match[1] as VerdictOutcome,
-    head: match[2],
-    base: match[3],
-    by: match[4],
-  };
 }
 
 export const isInstructionFile = (path: string): boolean => {
@@ -507,13 +611,17 @@ const reviewDecision: Requirement = {
   },
 };
 
-const verdict: Requirement = {
-  name: "Independent verdict",
-  evaluate({ verdict: fact, currentHash, mergeBase, pull }) {
-    const postLine = `pstack-verdict: <PASS|PASS+NOTES|FAIL> head=${pull.headRefOid} base=${mergeBase} by=<model>`;
+const review: Requirement = {
+  name: "Independent review",
+  evaluate({ review: fact, currentHash, mergeBase, pull }) {
+    const postLine = `pstack-review: head=${pull.headRefOid} base=${mergeBase} by=<model>`;
+    if (fact.kind === "none" && fact.oldVerdict !== null)
+      return unmet(
+        `The PR has a pstack-verdict line (${fact.oldVerdict}) and no pstack-review line. The gate reads only reviews now. Have the verifier restate its report as one comment in Shipping step 1's review format, starting "pstack-review: head=<the head it verified> base=<that head's merge base> by=<model>", with a box line per plan box and an issue line per issue. The restated review links the original comment and does not rerun unchanged code.`
+      );
     if (fact.kind === "none")
       return unmet(
-        `No verdict on the PR. Have a verifier from the other model family review it and post the line "${postLine}".${fact.ignored.length === 0 ? "" : " The gate ignored the verdict lines below because their authors are not owners, members or collaborators of the repo."}`,
+        `No review on the PR. Have a verifier from the other model family review it and post the line "${postLine}".${fact.ignored.length === 0 ? "" : " The gate ignored the review lines below because their authors are not owners, members or collaborators of the repo."}`,
         fact.ignored.length === 0
           ? undefined
           : fact.ignored.map(
@@ -523,33 +631,55 @@ const verdict: Requirement = {
       );
     if (fact.kind === "malformed")
       return unmet(
-        `The latest verdict line does not read as "${postLine}" (${fact.url}). Have the verifier post a corrected line.`
+        `The latest review line does not read as "${postLine}" (${fact.url}). Have the verifier post a corrected line.`
       );
-    if (fact.outcome === "FAIL")
-      return unmet(
-        `The latest verdict is FAIL (${fact.url}). Fix what it found and get a new verdict. The lead's ruling on a finding never turns a FAIL into a pass; the verifier's next verdict weighs it.`
+    const numbers = fact.issues.map(({ n }) => n);
+    const repeated = [...new Set(numbers)].filter(
+      (n) => numbers.indexOf(n) !== numbers.lastIndexOf(n)
+    );
+    const parts: string[] = [];
+    const details: string[] = [];
+    if (fact.unreadIssueLines.length > 0) {
+      parts.push(
+        `${fact.unreadIssueLines.length} issue line${fact.unreadIssueLines.length === 1 ? " does" : "s do"} not read as ${ISSUE_FORM}`
       );
+      details.push(...fact.unreadIssueLines.map((line) => `unread: ${line}`));
+    }
+    if (repeated.length > 0) {
+      parts.push(
+        `${repeated.length} issue number${repeated.length === 1 ? " is" : "s are"} used more than once. Have the verifier number each issue once`
+      );
+      details.push(`listed more than once: ${repeated.map((n) => `issue ${n}`).join(" ")}`);
+    }
+    if (parts.length > 0)
+      return unmet(`${parts.join(". ")}. (${fact.url})`, details);
     const reason = !fact.recordedHash.ok
-      ? `the verdict's change could not be hashed (${fact.recordedHash.detail})`
+      ? `the review's change could not be hashed (${fact.recordedHash.detail})`
       : !currentHash.ok
         ? `the PR's current change could not be hashed (${currentHash.detail})`
         : fact.recordedHash.hash !== currentHash.hash
-          ? "the code changed since the verdict"
+          ? "the code changed since the review"
           : null;
     if (reason !== null)
       return unmet(
-        `The latest verdict covers ${short(fact.base)}..${short(fact.head)}, not the PR's current change ${short(mergeBase)}..${short(pull.headRefOid)}, because ${reason}. Get a new verdict at this head.`
+        `The latest review covers ${short(fact.base)}..${short(fact.head)}, not the PR's current change ${short(mergeBase)}..${short(pull.headRefOid)}, because ${reason}. Get a new review at this head.`
       );
-    return met(`${fact.outcome} by ${fact.by} covers this code`);
+    const count = (severity: Severity) =>
+      fact.issues.filter((issue) => issue.severity === severity).length;
+    return met(
+      `by ${fact.by} covers this code, ${fact.issues.length === 0 ? "no issues" : SEVERITIES.map((severity) => `${count(severity)} ${severity}`).join(", ")}`
+    );
   },
 };
 
+export const ISSUE_FORM = '"issue <n> <high|medium|low>: <what is wrong>"';
+
 export const BOX_FORMS =
-  '"box <id>: done", "box <id>: n/a. <reason>", "box <id>: skipped. <what did not run>" or "box <id>: changed. <who accepted the changed bar>, <why>"';
+  '"box <id>: done", "box <id>: failed. issue <n>", "box <id>: n/a. <reason>" or "box <id>: skipped. <what did not run>"';
 
 const planBoxes: Requirement = {
   name: "Plan boxes",
-  evaluate({ verdict: fact, plan: planFact, accepted }) {
+  evaluate({ review: fact, plan: planFact, accepted }) {
     if (planFact.kind === "declared-missing") {
       const { path, pr } = planFact.declared;
       return unmet(
@@ -573,7 +703,7 @@ const planBoxes: Requirement = {
         ? ["No plan checked: the PR declares none and none was passed."]
         : [];
     if (fact.kind !== "found")
-      return met("no verdict to read; see Independent verdict", noPlan);
+      return met("no review to read; see Independent review", noPlan);
     const listed = new Set(fact.boxes.map((box) => box.id));
     const repeated = [...listed].filter(
       (id) => fact.boxes.filter((box) => box.id === id).length > 1
@@ -582,8 +712,13 @@ const planBoxes: Requirement = {
     const noReason = fact.boxes.filter(
       (box) => (box.status === "n/a" || box.status === "skipped") && box.note === ""
     );
-    const changed = fact.boxes.filter((box) => box.status === "changed");
-    const unowned = changed.filter((box) => barChange(box.note) === null);
+    const unlinked = fact.boxes.filter((box) => {
+      const issue = FAILED_NOTE.exec(box.note);
+      return (
+        box.status === "failed" &&
+        (issue === null || !fact.issues.some(({ n }) => n === Number(issue[1])))
+      );
+    });
     // Every agent posts as the same GitHub account, so no comment can say the lead accepted a skip; only the lead's own gate run can.
     const settled = new Set([
       ...accepted.skips.map(({ id }) => id),
@@ -599,16 +734,20 @@ const planBoxes: Requirement = {
         `${fact.unreadBoxLines.length} box line${fact.unreadBoxLines.length === 1 ? " does" : "s do"} not read as ${BOX_FORMS}`
       );
       details.push(...fact.unreadBoxLines.map((line) => `unread: ${line}`));
+      if (fact.unreadBoxLines.some((line) => CHANGED_BOX.test(line)))
+        parts.push(
+          'A changed bar is not a review status. The lead records it in the pstack-accept comment as "box <id>: changed. <earlier bar> to <new bar>, <who changed it>, <why>"'
+        );
     }
     if (repeated.length > 0) {
       parts.push(
-        `${repeated.length} box${repeated.length === 1 ? " is" : "es are"} listed more than once, so the verdict does not say which status holds. Have the verifier list each box once`
+        `${repeated.length} box${repeated.length === 1 ? " is" : "es are"} listed more than once, so the review does not say which status holds. Have the verifier list each box once`
       );
       details.push(`listed more than once: ${repeated.join(" ")}`);
     }
     if (omitted.length > 0) {
       parts.push(
-        `The verdict omits ${omitted.length} required box${omitted.length === 1 ? "" : "es"} of ${plan?.pr} in ${plan?.path}. Have the verifier list each one as ${BOX_FORMS}`
+        `The review omits ${omitted.length} required box${omitted.length === 1 ? "" : "es"} of ${plan?.pr} in ${plan?.path}. Have the verifier list each one as ${BOX_FORMS}`
       );
       details.push(`omitted: ${omitted.join(" ")}`);
     }
@@ -618,15 +757,15 @@ const planBoxes: Requirement = {
       );
       details.push(`no reason: ${noReason.map((box) => box.id).join(" ")}`);
     }
-    if (unowned.length > 0) {
+    if (unlinked.length > 0) {
       parts.push(
-        `${unowned.length} changed box${unowned.length === 1 ? " does" : "es do"} not name who accepted the changed bar and why. Have the verifier write "box <id>: changed. <who>, <why>"`
+        `${unlinked.length} failed box${unlinked.length === 1 ? " does" : "es do"} not name an issue the review lists. Have the verifier write "box <id>: failed. issue <n>" with an "issue <n> <severity>: ..." line for it`
       );
-      details.push(`no who and why: ${unowned.map((box) => box.id).join(" ")}`);
+      details.push(`no issue: ${unlinked.map((box) => box.id).join(" ")}`);
     }
     if (unwaived.length > 0) {
       parts.push(
-        `${unwaived.length} skipped box${unwaived.length === 1 ? " is" : "es are"} not accepted or deferred by the lead, so the verdict is not a pass. Run the box and get a new verdict. Or the lead runs the gate with "--accept-skip <id>=<reason>" for a box that does not apply, or "--defer <id>=<owner>" for a box whose work is owed`
+        `${unwaived.length} skipped box${unwaived.length === 1 ? " is" : "es are"} not accepted or deferred by the lead. Run the box and get a new review. Or the lead runs the gate with "--accept-skip <id>=<reason>" for a box that does not apply, or "--defer <id>=<owner>" for a box whose work is owed`
       );
       details.push(`not accepted: ${unwaived.map((box) => box.id).join(" ")}`);
     }
@@ -653,20 +792,11 @@ const planBoxes: Requirement = {
       ...(deferred.length === 0
         ? []
         : [`${deferred.length} box${deferred.length === 1 ? "" : "es"} deferred`]),
-      ...(changed.length === 0
-        ? []
-        : [`${changed.length} bar${changed.length === 1 ? "" : "s"} changed`]),
     ];
-    const changes = changed.flatMap((box) => {
-      const change = barChange(box.note);
-      return change === null
-        ? []
-        : [`changed: box ${box.id}, accepted by ${change.who}: ${change.why}`];
-    });
     const owed = deferred.map(
       ({ box, owner }) => `deferred: box ${box.id} to ${owner}: ${box.note}`
     );
-    const notesBelow = [...noPlan, ...changes, ...owed];
+    const notesBelow = [...noPlan, ...owed];
     return met(
       notes.join(", "),
       notesBelow.length === 0 ? undefined : notesBelow
@@ -675,12 +805,12 @@ const planBoxes: Requirement = {
 };
 
 export const SHORTCUT_FORM =
-  '"shortcut <id>: <what was not rerun, and the verdict it carries>. <why nothing that changed reaches it>", with <id> the box id such as live-1, or a lowercase slug with hyphens';
+  '"shortcut <id>: <what was not rerun, and the review it carries>. <why nothing that changed reaches it>", with <id> the box id such as live-1, or a lowercase slug with hyphens';
 
 const shortcuts: Requirement = {
   name: "Shortcuts",
-  evaluate({ verdict: fact, accepted }) {
-    if (fact.kind !== "found") return met("no verdict to read; see Independent verdict");
+  evaluate({ review: fact, accepted }) {
+    if (fact.kind !== "found") return met("no review to read; see Independent review");
     if (fact.shortcuts.length === 0 && fact.unreadShortcutLines.length === 0)
       return met("none listed");
     const ids = fact.shortcuts.map(({ id }) => id);
@@ -705,7 +835,7 @@ const shortcuts: Requirement = {
     }
     if (unaccepted.length > 0) {
       parts.push(
-        `${unaccepted.length} shortcut${unaccepted.length === 1 ? " is" : "s are"} not accepted by the lead. Rerun what it skipped and get a new verdict, or, if the lead accepts it, the lead runs the gate with "--accept-shortcut <id>=<reason>"`
+        `${unaccepted.length} shortcut${unaccepted.length === 1 ? " is" : "s are"} not accepted by the lead. Rerun what it skipped and get a new review, or, if the lead accepts it, the lead runs the gate with "--accept-shortcut <id>=<reason>"`
       );
       details.push(
         ...fact.shortcuts
@@ -719,6 +849,135 @@ const shortcuts: Requirement = {
       fact.shortcuts.map(
         ({ id, note }) => `shortcut ${id}: ${note} Accepted: ${reasons.get(id)}`
       )
+    );
+  },
+};
+
+export const ACCEPT_FORMS =
+  '"checked: <what you ran or read yourself>", "issue <n>: fixed in <sha>", "issue <n>: stands. <why it does not block>", "issue <n>: deferred to <owner>" with <owner> ' +
+  DEFER_OWNER_FORMS +
+  ', or "box <id>: changed. <earlier bar> to <new bar>, <who changed it>, <why>"';
+
+/** The issues the lead must give a line: each high and medium one, and each a failed box names. */
+const needsDisposition = (
+  fact: Extract<ReviewFact, { kind: "found" }>
+): readonly ReviewIssue[] => {
+  const ofFailed = new Set(
+    fact.boxes.flatMap((box) => {
+      const issue = box.status === "failed" ? FAILED_NOTE.exec(box.note) : null;
+      return issue === null ? [] : [Number(issue[1])];
+    })
+  );
+  return fact.issues.filter(
+    (issue) => issue.severity !== "low" || ofFailed.has(issue.n)
+  );
+};
+
+const dispositionLine = ({ n, disposition }: IssueDisposition): string =>
+  disposition.kind === "fixed"
+    ? `issue ${n}: fixed in ${disposition.sha}`
+    : disposition.kind === "stands"
+      ? `issue ${n}: stands. ${disposition.why}`
+      : `issue ${n}: deferred to ${disposition.owner}`;
+
+const acceptance: Requirement = {
+  name: "Lead's acceptance",
+  evaluate({ review: reviewed, acceptance: fact, pull }) {
+    if (reviewed.kind !== "found")
+      return unmet(
+        "No review to accept; see Independent review. Once the review is posted, the lead judges it and posts its acceptance at this head:",
+        [`pstack-accept: head=${pull.headRefOid} review=<url of the review comment> by=<your model>`]
+      );
+    const owed = needsDisposition(reviewed);
+    const postLines = [
+      `pstack-accept: head=${pull.headRefOid} review=${reviewed.url} by=<your model>`,
+      "checked: <what you ran or read yourself>",
+      ...owed.map(
+        ({ n }) =>
+          `issue ${n}: fixed in <sha> | stands. <why it does not block> | deferred to <owner>`
+      ),
+    ];
+    if (fact.kind === "none")
+      return unmet(
+        `The lead has not accepted the review (${reviewed.url}). The lead judges each issue, then posts one comment at this head:`,
+        postLines
+      );
+    if (fact.kind === "malformed")
+      return unmet(
+        `The latest acceptance line does not read as "pstack-accept: head=<head sha> review=<url> by=<model>" (${fact.url}). The lead posts a corrected one:`,
+        postLines
+      );
+    if (fact.review !== reviewed.url)
+      return unmet(
+        `The latest acceptance (${fact.url}) names the review ${fact.review}, not the one the gate reads (${reviewed.url}). The lead judges that review and posts a new acceptance:`,
+        postLines
+      );
+    if (fact.head !== pull.headRefOid && fact.head !== reviewed.head)
+      return unmet(
+        `The latest acceptance (${fact.url}) is at ${short(fact.head)}, neither the PR's head ${short(pull.headRefOid)} nor the review's ${short(reviewed.head)}. The lead posts a new acceptance:`,
+        postLines
+      );
+    const listed = new Set(reviewed.issues.map(({ n }) => n));
+    const given = fact.issues.map(({ n }) => n);
+    const repeated = [
+      ...[...new Set(given)]
+        .filter((n) => given.indexOf(n) !== given.lastIndexOf(n))
+        .map((n) => `issue ${n}`),
+      ...[...new Set(fact.bars.map(({ id }) => id))]
+        .filter((id) => fact.bars.filter((bar) => bar.id === id).length > 1)
+        .map((id) => `box ${id}`),
+    ];
+    const unlisted = [
+      ...given.filter((n) => !listed.has(n)).map((n) => `issue ${n}`),
+      ...fact.bars
+        .filter(({ id }) => !reviewed.boxes.some((box) => box.id === id))
+        .map(({ id }) => `box ${id}`),
+    ];
+    const undecided = owed.filter(({ n }) => !given.includes(n));
+    const parts: string[] = [];
+    const details: string[] = [];
+    if (fact.unreadLines.length > 0) {
+      parts.push(
+        `${fact.unreadLines.length} line${fact.unreadLines.length === 1 ? " does" : "s do"} not read as ${ACCEPT_FORMS}`
+      );
+      details.push(...fact.unreadLines.map((line) => `unread: ${line}`));
+    }
+    if (fact.checked === null)
+      parts.push(
+        'It has no "checked: <what you ran or read yourself>" line'
+      );
+    if (repeated.length > 0) {
+      parts.push(
+        `${repeated.length} line${repeated.length === 1 ? " is" : "s are"} given more than once. Give each once`
+      );
+      details.push(`given more than once: ${repeated.join(" ")}`);
+    }
+    if (unlisted.length > 0) {
+      parts.push(
+        `${unlisted.length} line${unlisted.length === 1 ? " names" : "s name"} an issue or box the review does not list`
+      );
+      details.push(`not in the review: ${unlisted.join(" ")}`);
+    }
+    if (undecided.length > 0) {
+      parts.push(
+        `${undecided.length} issue${undecided.length === 1 ? " has" : "s have"} no line. Each high and medium issue, and the issue of each failed box, needs "issue <n>: fixed in <sha>", "issue <n>: stands. <why>" or "issue <n>: deferred to <owner>"`
+      );
+      details.push(
+        ...undecided.map(({ n, severity, text }) => `no line: issue ${n} ${severity}: ${text}`)
+      );
+    }
+    if (parts.length > 0)
+      return unmet(`${parts.join(". ")}. (${fact.url})`, details);
+    const count = (kind: Disposition["kind"]) =>
+      fact.issues.filter(({ disposition }) => disposition.kind === kind).length;
+    const bars = fact.bars.length === 0 ? "" : `, ${fact.bars.length} bar${fact.bars.length === 1 ? "" : "s"} changed`;
+    return met(
+      `by ${fact.by}: ${count("stands")} stand, ${count("deferred")} deferred, ${count("fixed")} fixed${bars}`,
+      [
+        `checked: ${fact.checked}`,
+        ...fact.issues.map(dispositionLine),
+        ...fact.bars.map(({ id, change }) => `box ${id}: changed. ${change}`),
+      ]
     );
   },
 };
@@ -793,9 +1052,10 @@ export const REQUIREMENTS: readonly Requirement[] = [
   checks,
   reviewThreads,
   reviewDecision,
-  verdict,
+  review,
   planBoxes,
   shortcuts,
+  acceptance,
   codexReview,
   instructionApproval,
 ];

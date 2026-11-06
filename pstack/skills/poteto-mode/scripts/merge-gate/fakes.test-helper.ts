@@ -58,6 +58,8 @@ export interface Repos {
   readonly head: string;
   /** The rebased feature with different code. */
   readonly changedHead: string;
+  /** The feature plus a doc fix. */
+  readonly docHead: string;
   /** The feature plus AGENTS.md and sub/Claude.md, first text. */
   readonly instructionHead: string;
   /** The feature plus the instruction files with edited text. */
@@ -94,6 +96,11 @@ export function makeRepos(): Repos {
   branchFrom(main);
   const changedHead = commit({ "a.txt": "two\n" }, "feature, changed");
   branchFrom(head);
+  const docHead = commit(
+    { "docs/retrieval.md": "An oversized item slices only when 256 tokens remain.\n" },
+    "docs: retrieval budget"
+  );
+  branchFrom(head);
   const instructionHead = commit(
     { "AGENTS.md": "v1\n", "sub/Claude.md": "c1\n" },
     "instructions v1"
@@ -116,6 +123,7 @@ export function makeRepos(): Repos {
     oldHead,
     head,
     changedHead,
+    docHead,
     instructionHead,
     editedInstructionHead,
   ].entries()) {
@@ -140,6 +148,7 @@ export function makeRepos(): Repos {
     oldHead,
     head,
     changedHead,
+    docHead,
     instructionHead,
     editedInstructionHead,
   };
@@ -207,13 +216,22 @@ export function comment(
     url: `https://github.com/owner/repo/pull/1#issuecomment-${commentTime}`,
   };
 }
-export const verdictComment = (
-  outcome: string,
+export const reviewComment = (
   head: string,
-  base: string
+  base: string,
+  below: readonly string[] = []
 ): IssueComment =>
   comment(
-    `Reviewed.\npstack-verdict: ${outcome} head=${head} base=${base} by=codex/gpt-6.1-sol`,
+    [`Reviewed.`, `pstack-review: head=${head} base=${base} by=codex/gpt-6.1-sol`, ...below].join("\n"),
+    "leegmoore"
+  );
+export const acceptComment = (
+  review: IssueComment,
+  head: string,
+  below: readonly string[] = ["checked: read the verifier's evidence"]
+): IssueComment =>
+  comment(
+    [`pstack-accept: head=${head} review=${review.url} by=claudeAgent/claude-opus-5-5`, ...below].join("\n"),
     "leegmoore"
   );
 export const codexComment = (sha: string, status = "completed"): IssueComment =>

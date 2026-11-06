@@ -23,7 +23,8 @@ import {
   passing,
   running,
   runtimeFor,
-  verdictComment,
+  reviewComment,
+  acceptComment,
 } from "./fakes.test-helper.ts";
 
 let repos: Repos;
@@ -31,19 +32,45 @@ beforeAll(() => {
   repos = makeRepos();
 });
 
-/** Comments that satisfy the verdict and Codex requirements for `head` on main. */
-const approvals = (head = repos.head, base = repos.main) => [
-  verdictComment("PASS", head, base),
-  codexComment(head),
-];
+/** Comments that satisfy the review, acceptance and Codex requirements for `head` on main. */
+const approvals = (head = repos.head, base = repos.main) => {
+  const review = reviewComment(head, base);
+  return [review, acceptComment(review, head), codexComment(head)];
+};
+
+/**
+ * Given comments with a review and no acceptance, the lead accepts the newest review at the PR's head,
+ * so a test about another requirement need not write one. `accept: false` leaves them as given.
+ */
+function withAcceptance(
+  comments: readonly IssueComment[],
+  head: string
+): IssueComment[] {
+  const has = (prefix: string) => (c: IssueComment) =>
+    c.body.split("\n").some((line) => line.trim().startsWith(prefix));
+  const review = comments.findLast(has("pstack-review:"));
+  return review === undefined || comments.some(has("pstack-accept:"))
+    ? [...comments]
+    : [...comments, acceptComment(review, head)];
+}
 
 async function gate(
-  options: Partial<FakeOptions> = {},
+  options: Partial<FakeOptions> & { readonly accept?: false } = {},
   flags: readonly string[] = ["--check"]
 ) {
+  const head = options.pull?.headRefOid ?? repos.head;
   const github = fakeGitHub({
-    comments: approvals(),
     ...options,
+    comments:
+      options.comments === undefined
+        ? approvals()
+        : options.accept === false
+          ? options.comments
+          : withAcceptance(options.comments, head),
+    atMerge:
+      options.atMerge?.comments === undefined || options.accept === false
+        ? options.atMerge
+        : { ...options.atMerge, comments: withAcceptance(options.atMerge.comments, head) },
     pull: { headRefOid: repos.head, ...options.pull },
   });
   const runtime = runtimeFor(github, repos.gate);
@@ -273,43 +300,56 @@ describe("merge-gate", () => {
     });
   });
 
-  describe("independent verdict", () => {
-    const verdictLine = (out: string) =>
+  describe("independent review", () => {
+    const reviewLine = (out: string) =>
       out
         .split("\n")
-        .find((line) => line.startsWith("missing: Independent verdict")) ?? "";
+        .find((line) => line.startsWith("missing: Independent review")) ?? "";
 
-    it("refuses with no verdict and prints the line to post for this head and merge base", async () => {
+    it("refuses with no review and prints the review and acceptance lines to post for this head", async () => {
       const result = await gate({ comments: [codexComment(repos.head)] });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain(
-        `"pstack-verdict: <PASS|PASS+NOTES|FAIL> head=${repos.head} base=${repos.main} by=<model>"`
+      expect(reviewLine(result.out)).toContain(
+        `"pstack-review: head=${repos.head} base=${repos.main} by=<model>"`
+      );
+      expect(result.out).toContain(
+        `  pstack-accept: head=${repos.head} review=<url of the review comment> by=<your model>\n`
       );
     });
 
-    it("ignores a verdict line from an account that is not an owner, member or collaborator", async () => {
+    it("ignores a review line from an account that is not an owner, member or collaborator", async () => {
       const forged = comment(
-        `pstack-verdict: PASS head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
+        `pstack-review: head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
         "drive-by",
         false,
         "NONE"
       );
       const result = await gate({
-        comments: [codexComment(repos.head), forged],
+        comments: [codexComment(repos.head), forged, acceptComment(forged, repos.head)],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toStartWith(
-        "missing: Independent verdict. No verdict on the PR."
+      expect(reviewLine(result.out)).toStartWith(
+        "missing: Independent review. No review on the PR."
       );
       expect(result.out).toContain(`  ignored: drive-by (NONE) ${forged.url}`);
     });
 
-    it("counts a verdict line from a collaborator or the owner", async () => {
+    it("ignores an acceptance from an account that is not an owner, member or collaborator", async () => {
+      const review = reviewComment(repos.head, repos.main);
+      const forged = { ...acceptComment(review, repos.head), author: "drive-by", association: "NONE" as const };
+      const result = await gate({ comments: [review, forged, codexComment(repos.head)], accept: false });
+      expect(result.exit).toBe(1);
+      expect(result.missing).toEqual([
+        `missing: Lead's acceptance. The lead has not accepted the review (${review.url}). The lead judges each issue, then posts one comment at this head:`,
+      ]);
+    });
+
+    it("counts a review line from a collaborator or the owner", async () => {
       for (const association of ["COLLABORATOR", "OWNER"] as const) {
         const result = await gate({
           comments: [
             comment(
-              `pstack-verdict: PASS head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
+              `pstack-review: head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
               "someone",
               false,
               association
@@ -321,119 +361,278 @@ describe("merge-gate", () => {
       }
     });
 
-    it("refuses a FAIL verdict", async () => {
-      const result = await gate({
-        comments: [
-          verdictComment("FAIL", repos.head, repos.main),
-          codexComment(repos.head),
-        ],
-      });
+    it("refuses an old pstack-verdict and asks for it restated as a review, never reading it as one", async () => {
+      const old = comment(
+        `pstack-verdict: PASS head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol\nbox unit-1: done`
+      );
+      const result = await gate({ comments: [old, codexComment(repos.head)] });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain("The latest verdict is FAIL");
-    });
-
-    it("refuses a FAIL that the lead's ruling after it calls a trunk defect", async () => {
-      const result = await gate({
-        comments: [
-          verdictComment("FAIL", repos.head, repos.main),
-          comment(
-            `pstack-ruling: head=${repos.head} by=claudeAgent/claude-opus-5-5\nThe one finding is a trunk defect, so it does not gate this PR.`
-          ),
-          codexComment(repos.head),
-        ],
-      });
-      expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain(
-        "The lead's ruling on a finding never turns a FAIL into a pass"
+      expect(reviewLine(result.out)).toBe(
+        `missing: Independent review. The PR has a pstack-verdict line (${old.url}) and no pstack-review line. The gate reads only reviews now. Have the verifier restate its report as one comment in Shipping step 1's review format, starting "pstack-review: head=<the head it verified> base=<that head's merge base> by=<model>", with a box line per plan box and an issue line per issue. The restated review links the original comment and does not rerun unchanged code.`
       );
     });
 
-    it("uses the most recent verdict: a newer FAIL beats an older PASS", async () => {
+    it("uses the most recent review: a newer one of other code beats an older one of this code", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
-          verdictComment("FAIL", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
+          reviewComment(repos.changedHead, repos.main),
           codexComment(repos.head),
         ],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain("FAIL");
+      expect(reviewLine(result.out)).toContain("because the code changed since the review");
     });
 
-    it("breaks a same-second tie toward the later comment: FAIL after PASS refuses", async () => {
-      const pass = verdictComment("PASS", repos.head, repos.main);
-      const fail = {
-        ...verdictComment("FAIL", repos.head, repos.main),
-        createdAt: pass.createdAt,
-        updatedAt: pass.updatedAt,
+    it("breaks a same-second tie toward the later comment", async () => {
+      const older = reviewComment(repos.head, repos.main);
+      const newer = {
+        ...reviewComment(repos.changedHead, repos.main),
+        createdAt: older.createdAt,
+        updatedAt: older.updatedAt,
       };
       const result = await gate({
-        comments: [pass, fail, codexComment(repos.head)],
+        comments: [older, newer, codexComment(repos.head)],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain("The latest verdict is FAIL");
+      expect(reviewLine(result.out)).toContain("because the code changed since the review");
     });
 
-    it("uses the most recent verdict: a newer PASS+NOTES beats an older FAIL", async () => {
+    it("refuses when the latest review line is malformed, even with an older good one", async () => {
       const result = await gate({
         comments: [
-          verdictComment("FAIL", repos.head, repos.main),
-          verdictComment("PASS+NOTES", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
+          comment(`pstack-review: head=${repos.head.slice(0, 7)}`),
+          codexComment(repos.head),
+        ],
+      });
+      expect(result.exit).toBe(1);
+      expect(reviewLine(result.out)).toContain("does not read as");
+    });
+
+    it("reads issue lines leniently and counts them by severity", async () => {
+      const review = reviewComment(repos.head, repos.main, [
+        "issue 1 medium: the open You page shows the expired plan. Reload shows Free.",
+        "- issue 2 low: billing.md says active where the code accepts trialing",
+      ]);
+      const result = await gate({
+        comments: [
+          review,
+          acceptComment(review, repos.head, ["checked: reran the expiry probe", "issue 1: stands. Reload corrects it."]),
           codexComment(repos.head),
         ],
       });
       expect(result.exit).toBe(0);
       expect(result.out).toContain(
-        "met: Independent verdict (PASS+NOTES by codex/gpt-6.1-sol covers this code)"
+        "met: Independent review (by codex/gpt-6.1-sol covers this code, 0 high, 1 medium, 1 low)"
       );
     });
 
-    it("refuses when the latest verdict line is malformed, even with an older PASS", async () => {
+    it("refuses an issue line it cannot read and an issue number used twice", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
-          comment(`pstack-verdict: FAIL head=${repos.head.slice(0, 7)}`),
+          reviewComment(repos.head, repos.main, [
+            "issue 1 high: two checkout links make two subscriptions",
+            "issue 1 low: a typo",
+            "issue 2 P1: the old severity words",
+            "issue 3 medium:",
+          ]),
           codexComment(repos.head),
         ],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain("does not read as");
+      expect(reviewLine(result.out)).toContain(
+        '2 issue lines do not read as "issue <n> <high|medium|low>: <what is wrong>". 1 issue number is used more than once.'
+      );
+      expect(result.out).toContain("  unread: issue 2 P1: the old severity words\n");
+      expect(result.out).toContain("  listed more than once: issue 1\n");
     });
 
     it("covers a rebased head whose change is identical, fetching a force-pushed-away commit by SHA", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.oldHead, repos.c0),
+          reviewComment(repos.oldHead, repos.c0),
           codexComment(repos.head),
         ],
       });
       expect(result.exit).toBe(0);
-      expect(result.out).toContain("met: Independent verdict");
+      expect(result.out).toContain("met: Independent review");
     });
 
-    it("refuses when the code changed since the verdict", async () => {
+    it("refuses when the code changed since the review", async () => {
       const result = await gate({
         pull: { headRefOid: repos.changedHead },
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
           codexComment(repos.changedHead),
         ],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain(
-        "because the code changed since the verdict"
+      expect(reviewLine(result.out)).toContain(
+        "because the code changed since the review"
       );
     });
 
-    it("refuses when the verdict names a commit the remote does not have", async () => {
+    it("refuses when the review names a commit the remote does not have", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", "1".repeat(40), repos.main),
+          reviewComment("1".repeat(40), repos.main),
           codexComment(repos.head),
         ],
       });
       expect(result.exit).toBe(1);
-      expect(verdictLine(result.out)).toContain("could not be fetched");
+      expect(reviewLine(result.out)).toContain("could not be fetched");
+    });
+  });
+
+  describe("lead's acceptance", () => {
+    const acceptLine = (out: string) =>
+      out.split("\n").find((line) => line.startsWith("missing: Lead's acceptance")) ?? "";
+    const issues = [
+      "issue 1 high: two checkout links can create two subscriptions. Pay both links. Stripe lists two. One account has one plan.",
+      "issue 2 medium: a late update relinks a canceled subscription",
+      "issue 3 low: billing.md says active where the code accepts trialing",
+    ];
+    const accepting = (
+      review: IssueComment,
+      below: readonly string[],
+      head = repos.head
+    ) => gate({ comments: [review, acceptComment(review, head, below), codexComment(repos.head)] });
+
+    it("refuses a review the lead has not accepted, printing the acceptance to post with the review and owed issues filled in", async () => {
+      const review = reviewComment(repos.head, repos.main, issues);
+      const result = await gate({ comments: [review, codexComment(repos.head)], accept: false });
+      expect(result.exit).toBe(1);
+      expect(result.missing).toEqual([
+        `missing: Lead's acceptance. The lead has not accepted the review (${review.url}). The lead judges each issue, then posts one comment at this head:`,
+      ]);
+      expect(result.out).toContain(
+        [
+          `  pstack-accept: head=${repos.head} review=${review.url} by=<your model>`,
+          "  checked: <what you ran or read yourself>",
+          "  issue 1: fixed in <sha> | stands. <why it does not block> | deferred to <owner>",
+          "  issue 2: fixed in <sha> | stands. <why it does not block> | deferred to <owner>",
+          "",
+        ].join("\n")
+      );
+      expect(result.out).not.toContain("  issue 3:");
+    });
+
+    it("refuses an acceptance with no checked line", async () => {
+      const result = await accepting(reviewComment(repos.head, repos.main), []);
+      expect(result.exit).toBe(1);
+      expect(acceptLine(result.out)).toContain('It has no "checked: <what you ran or read yourself>" line');
+    });
+
+    it("refuses a high or medium issue with no line, and needs none for a low one", async () => {
+      const result = await accepting(reviewComment(repos.head, repos.main, issues), [
+        "checked: reproduced issue 1",
+        "issue 1: deferred to LH-215",
+      ]);
+      expect(result.exit).toBe(1);
+      expect(acceptLine(result.out)).toContain("1 issue has no line.");
+      expect(result.out).toContain("  no line: issue 2 medium: a late update relinks a canceled subscription\n");
+      expect(result.out).not.toContain("no line: issue 3");
+    });
+
+    it("merges on each disposition form, and the met note counts them and lists each", async () => {
+      const result = await accepting(reviewComment(repos.head, repos.main, issues), [
+        "checked: reproduced issue 1 with two paid links",
+        "issue 1: fixed in abc1234",
+        "- issue 2: stands. Stripe's redelivery converges it.",
+        "issue 3: deferred to mcp:launch:e22d/w1.7",
+      ]);
+      expect(result.exit).toBe(0);
+      expect(result.out).toContain(
+        [
+          "met: Lead's acceptance (by claudeAgent/claude-opus-5-5: 1 stand, 1 deferred, 1 fixed)",
+          "  checked: reproduced issue 1 with two paid links",
+          "  issue 1: fixed in abc1234",
+          "  issue 2: stands. Stripe's redelivery converges it.",
+          "  issue 3: deferred to mcp:launch:e22d/w1.7",
+          "",
+        ].join("\n")
+      );
+    });
+
+    it("refuses lines it cannot read, a repeated line, and lines for issues or boxes the review does not list", async () => {
+      const review = reviewComment(repos.head, repos.main, [...issues, "box unit-1: done"]);
+      const result = await accepting(review, [
+        "checked: read the evidence",
+        "issue 1: stands.",
+        "issue 1: deferred to later",
+        "issue 2: stands. fine",
+        "issue 2: fixed in abc1234",
+        "issue 9: stands. not in the review",
+        "box live-1: changed. 300 ms to 400 ms, Lee, a slower host",
+        "box unit-1: changed",
+      ]);
+      expect(result.exit).toBe(1);
+      expect(acceptLine(result.out)).toContain("3 lines do not read as");
+      expect(result.out).toContain("  unread: issue 1: stands.\n");
+      expect(result.out).toContain("  unread: issue 1: deferred to later\n");
+      expect(result.out).toContain("  unread: box unit-1: changed\n");
+      expect(result.out).toContain("  given more than once: issue 2\n");
+      expect(result.out).toContain("  not in the review: issue 9 box live-1\n");
+      expect(result.out).toContain("  no line: issue 1 high:");
+    });
+
+    it("records a changed bar for a box the review lists", async () => {
+      const review = reviewComment(repos.head, repos.main, ["box perf: done. 340 ms median"]);
+      const result = await accepting(review, [
+        "checked: read perf.json",
+        "box perf: changed. median under 300 ms to under 400 ms, Lee, the host is shared",
+      ]);
+      expect(result.exit).toBe(0);
+      expect(result.out).toContain(
+        "met: Lead's acceptance (by claudeAgent/claude-opus-5-5: 0 stand, 0 deferred, 0 fixed, 1 bar changed)\n  checked: read perf.json\n  box perf: changed. median under 300 ms to under 400 ms, Lee, the host is shared\n"
+      );
+    });
+
+    it("refuses an acceptance naming an older review", async () => {
+      const older = reviewComment(repos.head, repos.main);
+      const newer = reviewComment(repos.head, repos.main, ["issue 1 low: a typo"]);
+      const result = await gate({
+        comments: [older, acceptComment(older, repos.head), newer, codexComment(repos.head)],
+      });
+      expect(result.exit).toBe(1);
+      expect(acceptLine(result.out)).toBe(
+        `missing: Lead's acceptance. The latest acceptance (${result.out.match(/latest acceptance \((\S+)\)/)?.[1]}) names the review ${older.url}, not the one the gate reads (${newer.url}). The lead judges that review and posts a new acceptance:`
+      );
+    });
+
+    it("carries an acceptance at the review's head to a rebased head the review carries, and refuses one at any other head", async () => {
+      const review = reviewComment(repos.oldHead, repos.c0);
+      const carried = await gate({
+        comments: [review, acceptComment(review, repos.oldHead), codexComment(repos.head)],
+      });
+      expect(carried.exit).toBe(0);
+      const elsewhere = await gate({
+        comments: [review, acceptComment(review, repos.changedHead), codexComment(repos.head)],
+      });
+      expect(elsewhere.exit).toBe(1);
+      expect(acceptLine(elsewhere.out)).toContain(
+        `is at ${repos.changedHead.slice(0, 7)}, neither the PR's head ${repos.head.slice(0, 7)} nor the review's ${repos.oldHead.slice(0, 7)}`
+      );
+    });
+
+    it("refuses a malformed acceptance line", async () => {
+      const review = reviewComment(repos.head, repos.main);
+      const result = await gate({
+        comments: [review, comment(`pstack-accept: head=${repos.head} by=me`), codexComment(repos.head)],
+      });
+      expect(result.exit).toBe(1);
+      expect(acceptLine(result.out)).toContain('does not read as "pstack-accept: head=<head sha> review=<url> by=<model>"');
+    });
+
+    it("is not waivable", async () => {
+      const review = reviewComment(repos.head, repos.main);
+      const result = await gate(
+        { comments: [review, codexComment(repos.head)], accept: false },
+        ["--check", "--waive", "acceptance=the lead is busy"]
+      );
+      expect(result.exit).toBe(2);
+      expect(result.out).toContain('"acceptance" is not a check the lead may waive');
     });
   });
 
@@ -445,28 +644,28 @@ describe("merge-gate", () => {
       ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `live-${n}`),
       "perf",
     ];
-    const verdictWith = (boxLines: readonly string[]) =>
+    const reviewWith = (boxLines: readonly string[]) =>
       comment(
-        `pstack-verdict: PASS+NOTES head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol\n\n${boxLines.join("\n")}\n\nFindings below.`
+        `pstack-review: head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol\n\n${boxLines.join("\n")}\n\nFindings below.`
       );
     const allDone = () => GC2_IDS.map((id) => `box ${id}: done`);
     const planGate = (comments: readonly IssueComment[], flags = planFlags) =>
       gate({ comments: [...comments, codexComment(repos.head)] }, flags);
 
-    it("refuses GC2's real PASS+NOTES verdict, which lists none of the plan's boxes", async () => {
+    it("refuses GC2's real report restated as a review, which lists none of the plan's boxes", async () => {
       const body = readFileSync(
         join(import.meta.dir, "fixtures", "gc2-verdict.md"),
         "utf8"
-      );
+      ).replace(/^pstack-verdict: PASS\+NOTES /, "pstack-review: ");
       const result = await planGate([comment(body)]);
       expect(result.exit).toBe(1);
       const line = result.missing.find((l) => l.startsWith("missing: Plan boxes."));
-      expect(line).toContain("The verdict omits 16 required boxes of GC2");
+      expect(line).toContain("The review omits 16 required boxes of GC2");
       expect(result.out).toContain(`  omitted: ${GC2_IDS.join(" ")}`);
     });
 
-    it("would merge when the verdict lists every required box", async () => {
-      const result = await planGate([verdictWith(allDone())]);
+    it("would merge when the review lists every required box", async () => {
+      const result = await planGate([reviewWith(allDone())]);
       expect(result.exit).toBe(0);
       expect(result.out).toContain(
         "met: Plan boxes (all 16 required boxes of GC2 listed)"
@@ -477,7 +676,7 @@ describe("merge-gate", () => {
       const lines = allDone().map((line, i) =>
         i % 2 === 0 ? `- ${line}` : `**${line}**`
       );
-      expect((await planGate([verdictWith(lines)])).exit).toBe(0);
+      expect((await planGate([reviewWith(lines)])).exit).toBe(0);
     });
 
     it("requires the boxes of lanes indented in the plan", async () => {
@@ -489,7 +688,7 @@ describe("merge-gate", () => {
       );
       try {
         const result = await planGate(
-          [verdictWith(allDone().filter((line) => !line.includes("live-")))],
+          [reviewWith(allDone().filter((line) => !line.includes("live-")))],
           ["--check", "--plan", indented, "--plan-pr", "GC2"]
         );
         expect(result.exit).toBe(1);
@@ -501,12 +700,12 @@ describe("merge-gate", () => {
       }
     });
 
-    it("reads only the box lines under the verdict line that counts", async () => {
+    it("reads only the box lines under the review line that counts", async () => {
       const edited = comment(
         [
-          `pstack-verdict: PASS+NOTES head=${repos.oldHead} base=${repos.c0} by=codex/gpt-6.1-sol`,
+          `pstack-review: head=${repos.oldHead} base=${repos.c0} by=codex/gpt-6.1-sol`,
           ...allDone(),
-          `pstack-verdict: PASS+NOTES head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
+          `pstack-review: head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol`,
           "Rechecked at the new head.",
         ].join("\n")
       );
@@ -517,15 +716,15 @@ describe("merge-gate", () => {
 
     it("refuses a box listed more than once", async () => {
       for (const extra of ["box live-1: n/a. It did not run.", "box live-1: done"]) {
-        const result = await planGate([verdictWith([...allDone(), extra])]);
+        const result = await planGate([reviewWith([...allDone(), extra])]);
         expect(result.exit).toBe(1);
         expect(result.out).toContain("  listed more than once: live-1");
       }
     });
 
-    it("refuses a verdict that omits one box", async () => {
+    it("refuses a review that omits one box", async () => {
       const result = await planGate([
-        verdictWith(allDone().filter((line) => !line.includes("live-7"))),
+        reviewWith(allDone().filter((line) => !line.includes("live-7"))),
       ]);
       expect(result.exit).toBe(1);
       expect(result.out).toContain("  omitted: live-7");
@@ -541,7 +740,7 @@ describe("merge-gate", () => {
       values.flatMap((value) => ["--accept-skip", value]);
 
     it("refuses a skip the lead has not waived on the gate run", async () => {
-      const result = await planGate([verdictWith(perfSkipped())]);
+      const result = await planGate([reviewWith(perfSkipped())]);
       expect(result.exit).toBe(1);
       expect(result.out).toContain("  not accepted: perf");
       expect(result.out).toContain('"--accept-skip <id>=<reason>"');
@@ -550,11 +749,11 @@ describe("merge-gate", () => {
     it("refuses a skip an older verifier's comment signs, when a later verifier skips the same box", async () => {
       const older = comment(
         [
-          `pstack-verdict: PASS+NOTES head=${repos.oldHead} base=${repos.c0} by=claudeAgent/claude-opus-5-5`,
+          `pstack-review: head=${repos.oldHead} base=${repos.c0} by=claudeAgent/claude-opus-5-5`,
           "pstack-skip: perf by=claudeAgent/claude-opus-5-5 GC4 measures the same path against trunk.",
         ].join("\n")
       );
-      const result = await planGate([older, verdictWith(perfSkipped())]);
+      const result = await planGate([older, reviewWith(perfSkipped())]);
       expect(result.exit).toBe(1);
       expect(result.out).toContain("  not accepted: perf");
       expect(result.out).not.toContain("WOULD MERGE");
@@ -566,8 +765,8 @@ describe("merge-gate", () => {
         "pstack-skip: perf by=claudeAgent/claude-opus-5-5 I am the verifier, writing as the lead.",
       ];
       for (const comments of signatures.flatMap((signature) => [
-        [verdictWith([...perfSkipped(), signature])],
-        [verdictWith(perfSkipped()), comment(signature)],
+        [reviewWith([...perfSkipped(), signature])],
+        [reviewWith(perfSkipped()), comment(signature)],
       ])) {
         const result = await planGate(comments);
         expect(result.exit).toBe(1);
@@ -577,7 +776,7 @@ describe("merge-gate", () => {
 
     it("would merge a skip the lead waives with a reason, and logs the waiver", async () => {
       const result = await planGate(
-        [verdictWith(perfSkipped())],
+        [reviewWith(perfSkipped())],
         [...planFlags, ...waive("perf=GC4 measures the same path against trunk.")]
       );
       expect(result.exit).toBe(0);
@@ -585,35 +784,35 @@ describe("merge-gate", () => {
         "met: Plan boxes (all 16 required boxes of GC2 listed, 1 skip accepted by the lead)"
       );
       expect(result.calls.some((call) => call.startsWith("comment "))).toBe(false);
-      expect(result.log().split("\n")[1]).toEndWith(
-        '\tcheck\twould-merge\t\t[{"kind":"skip","id":"perf","reason":"GC4 measures the same path against trunk."}]'
+      expect(result.log().split("\n")[1]).toContain(
+        '\tcheck\twould-merge\t\t[{"kind":"skip","id":"perf","reason":"GC4 measures the same path against trunk."}]\t'
       );
     });
 
     it("posts the waivers on the PR before it merges, and logs them", async () => {
-      const verdict = verdictWith(perfSkipped());
+      const review = reviewWith(perfSkipped());
       const result = await planGate(
-        [verdict],
+        [review],
         ["--plan", plan, "--plan-pr", "GC2", ...waive("perf=GC4 measures the same path against trunk.")]
       );
       expect(result.exit).toBe(0);
       const posted = result.calls.findIndex((call) => call.startsWith("comment "));
       expect(result.calls[posted]).toBe(
-        `comment owner/repo#1 merge-gate: the lead waived these skipped boxes of the verdict ${verdict.url} to merge ${repos.head}.\n\n- perf: GC4 measures the same path against trunk.`
+        `comment owner/repo#1 merge-gate: the lead waived these skipped boxes of the review ${review.url} to merge ${repos.head}.\n\n- perf: GC4 measures the same path against trunk.`
       );
       expect(posted).toBeLessThan(
         result.calls.findIndex((call) => call.startsWith("merge "))
       );
       expect(result.calls.filter((call) => call.startsWith("comment "))).toHaveLength(1);
-      expect(result.log().split("\n")[1]).toEndWith(
-        '\tmerge\tmerged\t\t[{"kind":"skip","id":"perf","reason":"GC4 measures the same path against trunk."}]'
+      expect(result.log().split("\n")[1]).toContain(
+        '\tmerge\tmerged\t\t[{"kind":"skip","id":"perf","reason":"GC4 measures the same path against trunk."}]\t'
       );
     });
 
     it("merges nothing when the waivers cannot be posted", async () => {
       const result = await gate(
         {
-          comments: [verdictWith(perfSkipped()), codexComment(repos.head)],
+          comments: [reviewWith(perfSkipped()), codexComment(repos.head)],
           comment: { ok: false, detail: "HTTP 502" },
         },
         ["--plan", plan, "--plan-pr", "GC2", ...waive("perf=covered by GC4")]
@@ -623,12 +822,12 @@ describe("merge-gate", () => {
       expect(merged(result.calls)).toBe(false);
     });
 
-    it("merges nothing when the verdict at merge time no longer skips a waived box", async () => {
+    it("merges nothing when the review at merge time no longer skips a waived box", async () => {
       const result = await gate(
         {
-          comments: [verdictWith(perfSkipped()), codexComment(repos.head)],
+          comments: [reviewWith(perfSkipped()), codexComment(repos.head)],
           atMerge: {
-            comments: [verdictWith(allDone()), codexComment(repos.head)],
+            comments: [reviewWith(allDone()), codexComment(repos.head)],
           },
         },
         ["--plan", plan, "--plan-pr", "GC2", ...waive("perf=covered by GC4")]
@@ -648,7 +847,7 @@ describe("merge-gate", () => {
         [["perf=one", "perf=two"], "box perf is given more than once"],
       ] as const) {
         const result = await planGate(
-          [verdictWith(perfSkipped())],
+          [reviewWith(perfSkipped())],
           [...planFlags, ...waive(...values)]
         );
         expect(result.exit).toBe(2);
@@ -661,22 +860,22 @@ describe("merge-gate", () => {
       values.flatMap((value) => ["--defer", value]);
 
     it("would merge a box the lead defers to its owner, posting and logging the owner and what is owed", async () => {
-      const verdict = verdictWith(perfSkipped());
-      const check = await planGate([verdict], [...planFlags, ...defer("perf=LH-215")]);
+      const review = reviewWith(perfSkipped());
+      const check = await planGate([review], [...planFlags, ...defer("perf=LH-215")]);
       expect(check.exit).toBe(0);
       expect(check.out).toContain(
         "met: Plan boxes (all 16 required boxes of GC2 listed, 1 box deferred)\n  deferred: box perf to LH-215: Trunk lacks the feature, so no comparison ran.\n"
       );
       const result = await planGate(
-        [verdict],
+        [review],
         ["--plan", plan, "--plan-pr", "GC2", ...defer("perf=mcp:launch:e22d/w1.7")]
       );
       expect(result.exit).toBe(0);
       expect(result.calls.find((call) => call.startsWith("comment "))).toBe(
-        `comment owner/repo#1 merge-gate: the lead deferred these skipped boxes of the verdict ${verdict.url} to their owners to merge ${repos.head}.\n\n- perf: mcp:launch:e22d/w1.7. Owed: Trunk lacks the feature, so no comparison ran.`
+        `comment owner/repo#1 merge-gate: the lead deferred these skipped boxes of the review ${review.url} to their owners to merge ${repos.head}.\n\n- perf: mcp:launch:e22d/w1.7. Owed: Trunk lacks the feature, so no comparison ran.`
       );
-      expect(result.log().split("\n")[1]).toEndWith(
-        '\tmerge\tmerged\t\t[{"kind":"defer","id":"perf","reason":"mcp:launch:e22d/w1.7"}]'
+      expect(result.log().split("\n")[1]).toContain(
+        '\tmerge\tmerged\t\t[{"kind":"defer","id":"perf","reason":"mcp:launch:e22d/w1.7"}]\t'
       );
     });
 
@@ -688,29 +887,29 @@ describe("merge-gate", () => {
         ["perf=runs on staging after merge", "is not a Linear id"],
         ["perf=w1.7", "is not a Linear id"],
       ] as const) {
-        const result = await planGate([verdictWith(perfSkipped())], [...planFlags, ...defer(value)]);
+        const result = await planGate([reviewWith(perfSkipped())], [...planFlags, ...defer(value)]);
         expect(result.exit).toBe(2);
         expect(result.out).toContain(text);
       }
     });
 
-    it("exits 2 on a box both accepted and deferred, or deferred when the verdict did not skip it", async () => {
+    it("exits 2 on a box both accepted and deferred, or deferred when the review did not skip it", async () => {
       const both = await planGate(
-        [verdictWith(perfSkipped())],
+        [reviewWith(perfSkipped())],
         [...planFlags, ...waive("perf=covered by GC4"), ...defer("perf=LH-215")]
       );
       expect(both.exit).toBe(2);
       expect(both.out).toContain("box perf is both accepted and deferred");
-      const stray = await planGate([verdictWith(allDone())], [...planFlags, ...defer("perf=LH-215")]);
+      const stray = await planGate([reviewWith(allDone())], [...planFlags, ...defer("perf=LH-215")]);
       expect(stray.exit).toBe(2);
-      expect(stray.out).toContain("--defer perf: the verdict");
+      expect(stray.out).toContain("--defer perf: the review");
       expect(stray.out).toContain("does not skip box perf");
     });
 
-    it("exits 2 on an --accept-skip for a box the verdict did not skip", async () => {
+    it("exits 2 on an --accept-skip for a box the review did not skip", async () => {
       for (const flags of [planFlags, ["--plan", plan, "--plan-pr", "GC2"]]) {
         const result = await planGate(
-          [verdictWith(perfSkipped())],
+          [reviewWith(perfSkipped())],
           [...flags, ...waive("perf=covered by GC4", "live-1=not needed")]
         );
         expect(result.exit).toBe(2);
@@ -718,7 +917,7 @@ describe("merge-gate", () => {
         expect(result.out).not.toContain("box perf");
         expect(merged(result.calls)).toBe(false);
         expect(result.calls.some((call) => call.startsWith("comment "))).toBe(false);
-        expect(result.log()).toContain("\terror\tusage: --accept-skip live-1: the verdict");
+        expect(result.log()).toContain("\terror\tusage: --accept-skip live-1: the review");
       }
     });
 
@@ -730,39 +929,50 @@ describe("merge-gate", () => {
             ? "box live-4: passed"
             : line
       );
-      const result = await planGate([verdictWith(lines)]);
+      const result = await planGate([reviewWith(lines)]);
       expect(result.exit).toBe(1);
       expect(result.out).toContain("  no reason: live-3");
       expect(result.out).toContain("  unread: box live-4: passed");
     });
 
-    const perfChanged = (note: string) =>
-      allDone().map((line) => (line === "box perf: done" ? `box perf: changed. ${note}` : line));
+    const perfFailed = (note: string) =>
+      allDone().map((line) => (line === "box perf: done" ? `box perf: failed. ${note}` : line));
 
-    it("counts a changed box that names who accepted it and why, and lists it on the merge", async () => {
-      const result = await planGate(
-        [verdictWith(perfChanged("Lee, 14 of 8,190 arrivals off-slot are LIM-193"))],
-        ["--plan", plan, "--plan-pr", "GC2"]
+    it("refuses a box marked changed, and says the lead records a changed bar in its acceptance", async () => {
+      const lines = allDone().map((line) =>
+        line === "box perf: done" ? "box perf: changed. Lee, 14 of 8,190 arrivals off-slot are LIM-193" : line
       );
-      expect(result.exit).toBe(0);
-      expect(result.out).toStartWith("MERGED: ");
-      expect(result.out).toContain(
-        "met: Plan boxes (all 16 required boxes of GC2 listed, 1 bar changed)\n  changed: box perf, accepted by Lee: 14 of 8,190 arrivals off-slot are LIM-193\n"
+      const result = await planGate([reviewWith(lines)]);
+      expect(result.exit).toBe(1);
+      expect(result.out).toContain("  unread: box perf: changed. Lee, 14 of 8,190 arrivals off-slot are LIM-193\n");
+      expect(result.missing[0]).toContain(
+        'A changed bar is not a review status. The lead records it in the pstack-accept comment as "box <id>: changed. <earlier bar> to <new bar>, <who changed it>, <why>"'
       );
     });
 
-    it("refuses a changed box with no who and why", async () => {
-      for (const note of ["", "Lee", "Lee,", ", the bar moved"]) {
-        const lines = note === ""
-          ? allDone().map((line) => (line === "box perf: done" ? "box perf: changed" : line))
-          : perfChanged(note);
-        const result = await planGate([verdictWith(lines)]);
+    it("counts a failed box that names an issue the review lists, and needs the lead's line for that issue even when low", async () => {
+      const review = reviewWith([...perfFailed("issue 1"), "issue 1 low: median 340 ms against a 300 ms bar"]);
+      const refused = await planGate([review]);
+      expect(refused.exit).toBe(1);
+      expect(refused.missing).toEqual([expect.stringMatching(/^missing: Lead.s acceptance. 1 issue has no line\./)]);
+      expect(refused.out).toContain("met: Plan boxes (all 16 required boxes of GC2 listed)");
+      const accepted = await planGate([
+        review,
+        acceptComment(review, repos.head, ["checked: read perf.json", "issue 1: stands. The shared host adds 40 ms."]),
+      ]);
+      expect(accepted.exit).toBe(0);
+    });
+
+    it("refuses a failed box that names no issue the review lists", async () => {
+      for (const note of ["the median was slow", "issue 2"]) {
+        const result = await planGate([reviewWith([...perfFailed(note), "issue 1 low: slow"])]);
         expect(result.exit).toBe(1);
-        expect(result.missing[0]).toContain(
-          'Plan boxes. 1 changed box does not name who accepted the changed bar and why. Have the verifier write "box <id>: changed. <who>, <why>"'
-        );
-        expect(result.out).toContain("  no who and why: perf");
+        expect(result.out).toContain("  no issue: perf\n");
       }
+      const bare = await planGate([
+        reviewWith(allDone().map((line) => (line === "box perf: done" ? "box perf: failed" : line))),
+      ]);
+      expect(bare.out).toContain("  no issue: perf\n");
     });
 
     describe("a plan the PR body declares", () => {
@@ -785,11 +995,11 @@ describe("merge-gate", () => {
       };
 
       it("checks the declared plan when no --plan is passed", async () => {
-        const refused = await declaring(`pstack-plan: ${plan} pr=GC2`, [verdictWith([])]);
+        const refused = await declaring(`pstack-plan: ${plan} pr=GC2`, [reviewWith([])]);
         expect(refused.exit).toBe(1);
-        expect(refused.out).toContain("The verdict omits 16 required boxes of GC2");
+        expect(refused.out).toContain("The review omits 16 required boxes of GC2");
 
-        const passed = await declaring(`pstack-plan: ${plan} pr=GC2`, [verdictWith(allDone())]);
+        const passed = await declaring(`pstack-plan: ${plan} pr=GC2`, [reviewWith(allDone())]);
         expect(passed.exit).toBe(0);
         expect(passed.out).toContain(
           "met: Plan boxes (all 16 required boxes of GC2 listed, from the plan the PR body declares)"
@@ -798,11 +1008,11 @@ describe("merge-gate", () => {
 
       it("resolves a relative declared path from the working directory, and agrees with its full path passed", async () => {
         const full = inCheckout();
-        const declared = await declaring("pstack-plan: docs/plan.md pr=GC2", [verdictWith(allDone())]);
+        const declared = await declaring("pstack-plan: docs/plan.md pr=GC2", [reviewWith(allDone())]);
         expect(declared.exit).toBe(0);
         const passed = await declaring(
           "pstack-plan: docs/plan.md pr=GC2",
-          [verdictWith(allDone())],
+          [reviewWith(allDone())],
           ["--check", "--plan", full, "--plan-pr", "GC2"]
         );
         expect(passed.exit).toBe(0);
@@ -810,7 +1020,7 @@ describe("merge-gate", () => {
       });
 
       it("refuses a declared plan that is not on this machine and prints the flags to pass", async () => {
-        const result = await declaring("pstack-plan: docs/elsewhere-plan.md pr=GC2", [verdictWith(allDone())]);
+        const result = await declaring("pstack-plan: docs/elsewhere-plan.md pr=GC2", [reviewWith(allDone())]);
         expect(result.exit).toBe(1);
         expect(result.missing).toEqual([
           "missing: Plan boxes. The PR body declares the plan docs/elsewhere-plan.md for GC2, and it is not on this machine. Run the gate from where that path resolves, or pass the plan's path here:",
@@ -826,7 +1036,7 @@ describe("merge-gate", () => {
         ]) {
           const result = await declaring(
             "pstack-plan: docs/plan.md pr=GC2",
-            [verdictWith(allDone())],
+            [reviewWith(allDone())],
             ["--check", ...flags]
           );
           expect(result.exit).toBe(1);
@@ -842,15 +1052,15 @@ describe("merge-gate", () => {
         const dir = join(mkdtempSync(join(tmpdir(), "merge-gate-spaced-")), "Project Plans");
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(dir, "plan.md"), readFileSync(plan, "utf8"));
-        const spaced = await declaring(`pstack-plan: ${join(dir, "plan.md")} pr=GC2`, [verdictWith([])]);
+        const spaced = await declaring(`pstack-plan: ${join(dir, "plan.md")} pr=GC2`, [reviewWith([])]);
         expect(spaced.exit).toBe(1);
-        expect(spaced.out).toContain("The verdict omits 16 required boxes of GC2");
-        const malformed = await declaring(`pstack-plan: ${join(dir, "plan.md")}`, [verdictWith(allDone())]);
+        expect(spaced.out).toContain("The review omits 16 required boxes of GC2");
+        const malformed = await declaring(`pstack-plan: ${join(dir, "plan.md")}`, [reviewWith(allDone())]);
         expect(malformed.exit).toBe(2);
         expect(malformed.out).toContain("does not read as one pstack-plan: <plan file> pr=<PR id> line");
         const twice = await declaring(
           `pstack-plan: ${join(dir, "plan.md")} pr=GC2\n\n\`\`\`\npstack-plan: ${plan} pr=GC2\n\`\`\``,
-          [verdictWith(allDone())]
+          [reviewWith(allDone())]
         );
         expect(twice.exit).toBe(2);
         expect(twice.out).toContain("2 plan lines");
@@ -863,7 +1073,7 @@ describe("merge-gate", () => {
         writeFileSync(join(stale, "plan.md"), readFileSync(plan, "utf8"));
         const result = await declaring(
           "pstack-plan: docs/plan.md pr=GC2",
-          [verdictWith(allDone())],
+          [reviewWith(allDone())],
           ["--check", "--plan", join(stale, "plan.md"), "--plan-pr", "GC2"]
         );
         expect(result.exit).toBe(1);
@@ -873,7 +1083,7 @@ describe("merge-gate", () => {
       });
 
       it("says plainly when no plan was checked, and still passes", async () => {
-        const result = await declaring("", [verdictWith([])]);
+        const result = await declaring("", [reviewWith([])]);
         expect(result.exit).toBe(0);
         expect(result.out).toContain(
           "met: Plan boxes (no plan given, 0 boxes listed)\n  No plan checked: the PR declares none and none was passed.\n"
@@ -883,24 +1093,24 @@ describe("merge-gate", () => {
 
     it("checks skips even with no plan given", async () => {
       const result = await planGate(
-        [verdictWith(["box perf: skipped. Not run."])],
+        [reviewWith(["box perf: skipped. Not run."])],
         ["--check"]
       );
       expect(result.exit).toBe(1);
       expect(result.out).toContain("  not accepted: perf");
-      expect((await planGate([verdictWith([])], ["--check"])).out).toContain(
+      expect((await planGate([reviewWith([])], ["--check"])).out).toContain(
         "met: Plan boxes (no plan given, 0 boxes listed)"
       );
     });
 
     it("exits 2 when the plan has no section for the PR id, or --plan comes alone", async () => {
       const unknown = await planGate(
-        [verdictWith(allDone())],
+        [reviewWith(allDone())],
         ["--check", "--plan", plan, "--plan-pr", "GC9"]
       );
       expect(unknown.exit).toBe(2);
       expect(unknown.out).toContain('has no section whose title ends with "(GC9)"');
-      const alone = await planGate([verdictWith(allDone())], ["--check", "--plan", plan]);
+      const alone = await planGate([reviewWith(allDone())], ["--check", "--plan", plan]);
       expect(alone.exit).toBe(2);
       expect(alone.out).toContain("--plan and --plan-pr go together");
     });
@@ -908,17 +1118,17 @@ describe("merge-gate", () => {
 
   describe("shortcuts", () => {
     const carried =
-      "shortcut live-1: not rerun; carries the passing lane from the verdict at 9f7e294. Only features/README.md changed, which the lane does not run.";
+      "shortcut live-1: not rerun; carries the passing lane from the review at 9f7e294. Only features/README.md changed, which the lane does not run.";
     const withShortcuts = (...lines: string[]) =>
       comment(
-        `pstack-verdict: PASS head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol\n\nGates rerun at this head.\n${lines.join("\n")}`
+        `pstack-review: head=${repos.head} base=${repos.main} by=codex/gpt-6.1-sol\n\nGates rerun at this head.\n${lines.join("\n")}`
       );
-    const shortcutGate = (verdict: IssueComment, flags: readonly string[]) =>
-      gate({ comments: [verdict, codexComment(repos.head)] }, flags);
+    const shortcutGate = (review: IssueComment, flags: readonly string[]) =>
+      gate({ comments: [review, codexComment(repos.head)] }, flags);
     const accept = (...values: string[]) =>
       values.flatMap((value) => ["--accept-shortcut", value]);
 
-    it("says none were listed when the verdict lists none", async () => {
+    it("says none were listed when the review lists none", async () => {
       const result = await gate();
       expect(result.out).toContain("met: Shortcuts (none listed)");
     });
@@ -927,26 +1137,26 @@ describe("merge-gate", () => {
       const result = await shortcutGate(withShortcuts(carried), ["--check"]);
       expect(result.exit).toBe(1);
       expect(result.missing[0]).toContain(
-        'missing: Shortcuts. 1 shortcut is not accepted by the lead. Rerun what it skipped and get a new verdict, or, if the lead accepts it, the lead runs the gate with "--accept-shortcut <id>=<reason>"'
+        'missing: Shortcuts. 1 shortcut is not accepted by the lead. Rerun what it skipped and get a new review, or, if the lead accepts it, the lead runs the gate with "--accept-shortcut <id>=<reason>"'
       );
       expect(result.out).toContain(`  not accepted: ${carried}`);
     });
 
     it("merges once the lead accepts each shortcut, posting and logging the acceptance", async () => {
-      const verdict = withShortcuts(carried, "- shortcut perf: not rerun; carries perf from 9f7e294. No code the probe runs changed.");
-      const half = await shortcutGate(verdict, ["--check", ...accept("live-1=docs only")]);
+      const review = withShortcuts(carried, "- shortcut perf: not rerun; carries perf from 9f7e294. No code the probe runs changed.");
+      const half = await shortcutGate(review, ["--check", ...accept("live-1=docs only")]);
       expect(half.exit).toBe(1);
       expect(half.out).toContain("  not accepted: shortcut perf: not rerun");
-      const result = await shortcutGate(verdict, accept("live-1=docs only", "perf=the probe's code is unchanged"));
+      const result = await shortcutGate(review, accept("live-1=docs only", "perf=the probe's code is unchanged"));
       expect(result.exit).toBe(0);
       expect(result.out).toContain(
         `met: Shortcuts (2 accepted by the lead)\n  ${carried} Accepted: docs only\n`
       );
       expect(result.calls.find((call) => call.startsWith("comment "))).toBe(
-        `comment owner/repo#1 merge-gate: the lead accepted these shortcuts the verdict ${verdict.url} lists to merge ${repos.head}.\n\n- live-1: docs only\n- perf: the probe's code is unchanged`
+        `comment owner/repo#1 merge-gate: the lead accepted these shortcuts the review ${review.url} lists to merge ${repos.head}.\n\n- live-1: docs only\n- perf: the probe's code is unchanged`
       );
-      expect(result.log().split("\n")[1]).toEndWith(
-        `\tmerge\tmerged\t\t[{"kind":"shortcut","id":"live-1","reason":"docs only"},{"kind":"shortcut","id":"perf","reason":"the probe's code is unchanged"}]`
+      expect(result.log().split("\n")[1]).toContain(
+        `\tmerge\tmerged\t\t[{"kind":"shortcut","id":"live-1","reason":"docs only"},{"kind":"shortcut","id":"perf","reason":"the probe's code is unchanged"}]\t`
       );
     });
 
@@ -962,10 +1172,10 @@ describe("merge-gate", () => {
       expect(result.out).toContain("with <id> the box id such as live-1, or a lowercase slug with hyphens");
     });
 
-    it("exits 2 on an --accept-shortcut the verdict does not list, and on one with no reason", async () => {
+    it("exits 2 on an --accept-shortcut the review does not list, and on one with no reason", async () => {
       const stray = await shortcutGate(withShortcuts(carried), ["--check", ...accept("live-1=docs only", "perf=unchanged")]);
       expect(stray.exit).toBe(2);
-      expect(stray.out).toContain("--accept-shortcut perf: the verdict");
+      expect(stray.out).toContain("--accept-shortcut perf: the review");
       expect(stray.out).toContain("lists no shortcut perf");
       const bare = await shortcutGate(withShortcuts(carried), ["--check", ...accept("live-1")]);
       expect(bare.exit).toBe(2);
@@ -980,7 +1190,7 @@ describe("merge-gate", () => {
     it("refuses when Codex last reviewed an older head", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
           codexComment(repos.oldHead),
         ],
       });
@@ -992,7 +1202,7 @@ describe("merge-gate", () => {
 
     it("refuses when Codex has not reviewed", async () => {
       const result = await gate({
-        comments: [verdictComment("PASS", repos.head, repos.main)],
+        comments: [reviewComment(repos.head, repos.main)],
       });
       expect(result.exit).toBe(1);
       expect(result.missing).toEqual([
@@ -1003,7 +1213,7 @@ describe("merge-gate", () => {
     it("refuses while Codex's review of this head is still running", async () => {
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
           codexComment(repos.head, "in_progress"),
         ],
       });
@@ -1016,7 +1226,7 @@ describe("merge-gate", () => {
       const pending = codexComment(repos.head, "in_progress");
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
           { ...done, updatedAt: "2026-06-01T00:00:00.000Z" },
           pending,
         ],
@@ -1034,7 +1244,7 @@ describe("merge-gate", () => {
       };
       const result = await gate({
         comments: [
-          verdictComment("PASS", repos.head, repos.main),
+          reviewComment(repos.head, repos.main),
           done,
           pending,
         ],
@@ -1050,7 +1260,7 @@ describe("merge-gate", () => {
         isBot: false,
       };
       const result = await gate({
-        comments: [verdictComment("PASS", repos.head, repos.main), forged],
+        comments: [reviewComment(repos.head, repos.main), forged],
       });
       expect(result.exit).toBe(1);
       expect(result.missing[0]).toContain("Codex has not reviewed the PR");
@@ -1282,13 +1492,13 @@ describe("merge-gate", () => {
       expect(result.log()).toContain("\tmerge\trefused\tReview threads");
     });
 
-    it("merges nothing when a newer FAIL verdict lands after evaluation", async () => {
+    it("merges nothing when a newer review the lead has not accepted lands after evaluation", async () => {
       const result = await gate(
         {
           atMerge: {
             comments: [
               ...approvals(),
-              verdictComment("FAIL", repos.head, repos.main),
+              reviewComment(repos.head, repos.main, ["issue 1 high: two subscriptions"]),
             ],
           },
         },
@@ -1296,7 +1506,7 @@ describe("merge-gate", () => {
       );
       expect(result.exit).toBe(1);
       expect(merged(result.calls)).toBe(false);
-      expect(result.out).toContain("The latest verdict is FAIL");
+      expect(result.out).toContain("missing: Lead's acceptance. The latest acceptance");
     });
 
     it("refuses when the merge command fails, as when the head moved", async () => {
@@ -1317,26 +1527,31 @@ describe("merge-gate", () => {
   it("logs every run to runs.tsv with a header", async () => {
     const result = await gate({ checks: [failing("build")], threads: [] });
     expect(result.log().split("\n")).toEqual([
-      "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived",
-      `2026-10-17T12:00:00.000Z\towner/repo\t1\t${repos.head}\tcheck\trefused\tChecks\t`,
+      "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived\tacceptance",
+      `2026-10-17T12:00:00.000Z\towner/repo\t1\t${repos.head}\tcheck\trefused\tChecks\t\t`,
       "",
     ]);
   });
 
-  it("adds the waived column to a run log written before it", async () => {
-    const github = fakeGitHub({ comments: approvals(), pull: { headRefOid: repos.head } });
-    const runtime = runtimeFor(github, repos.gate);
-    const file = join(runtime.store, "merge-gate", "runs.tsv");
-    const old = "2026-10-01T00:00:00.000Z\towner/repo\t1\tabc\tcheck\trefused\tChecks\n";
-    mkdirSync(join(runtime.store, "merge-gate"));
-    writeFileSync(file, `ts\trepo\tpr\thead\tmode\toutcome\tmissing\n${old}`);
-    await main(["--repo", REPO, "--pr", "1", "--check"], runtime);
-    const rows = readFileSync(file, "utf8").split("\n");
-    expect(rows.slice(0, 2)).toEqual([
+  it("adds the newer columns to a run log written before them", async () => {
+    for (const header of [
+      "ts\trepo\tpr\thead\tmode\toutcome\tmissing",
       "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived",
-      old.trimEnd(),
-    ]);
-    expect(rows[2]).toEndWith("\tcheck\twould-merge\t\t");
+    ]) {
+      const github = fakeGitHub({ comments: approvals(), pull: { headRefOid: repos.head } });
+      const runtime = runtimeFor(github, repos.gate);
+      const file = join(runtime.store, "merge-gate", "runs.tsv");
+      const old = "2026-10-01T00:00:00.000Z\towner/repo\t1\tabc\tcheck\trefused\tChecks\n";
+      mkdirSync(join(runtime.store, "merge-gate"));
+      writeFileSync(file, `${header}\n${old}`);
+      await main(["--repo", REPO, "--pr", "1", "--check"], runtime);
+      const rows = readFileSync(file, "utf8").split("\n");
+      expect(rows.slice(0, 2)).toEqual([
+        "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived\tacceptance",
+        old.trimEnd(),
+      ]);
+      expect(rows[2]).toEndWith("\tcheck\twould-merge\t\t\t");
+    }
   });
 
   it("logs a passing --check as would-merge, not merged", async () => {
@@ -1430,6 +1645,7 @@ describe("merge-gate", () => {
         "error",
         "usage: unknown option '--badflag'",
         "",
+        "",
       ],
       [
         "",
@@ -1438,6 +1654,7 @@ describe("merge-gate", () => {
         "merge",
         "error",
         expect.stringMatching(/^usage: .*--pr/),
+        "",
         "",
       ],
     ]);
@@ -1455,7 +1672,7 @@ describe("merge-gate", () => {
   describe("waived gate checks", () => {
     const reason = "the e2e runner is down, LIM-200; Lee ran the suite locally";
 
-    it("names the --waive flag under each missing check a lead may waive, and none under the verdict", async () => {
+    it("names the --waive flag under each missing check a lead may waive, and none under the review", async () => {
       const result = await gate({
         checks: [failing("e2e")],
         threads: [{ author: "r", path: null, line: null, body: "nit", url: null }],
@@ -1467,7 +1684,7 @@ describe("merge-gate", () => {
           `  If the lead accepts merging without it, the lead runs the gate with --waive ${check}=<reason>.`
         );
       expect(result.out.match(/--waive /g)).toHaveLength(3);
-      expect(result.out).toContain("missing: Independent verdict.");
+      expect(result.out).toContain("missing: Independent review.");
     });
 
     it("would merge with a missing check the lead waives, and posts nothing under --check", async () => {
@@ -1477,14 +1694,14 @@ describe("merge-gate", () => {
         `met: Checks (waived by the lead: ${reason}; unmet: 1 failed (e2e). Fix the failures and push.)`
       );
       expect(result.calls.some((call) => call.startsWith("comment "))).toBe(false);
-      expect(result.log().split("\n")[1]).toEndWith(
-        `\tcheck\twould-merge\t\t[{"kind":"waiver","id":"checks","reason":"${reason}"}]`
+      expect(result.log().split("\n")[1]).toContain(
+        `\tcheck\twould-merge\t\t[{"kind":"waiver","id":"checks","reason":"${reason}"}]\t`
       );
     });
 
     it("posts the waived checks on the PR before it merges, and logs them", async () => {
       const result = await gate(
-        { checks: [failing("e2e")], comments: [verdictComment("PASS", repos.head, repos.main)] },
+        { checks: [failing("e2e")], comments: [reviewComment(repos.head, repos.main)] },
         ["--waive", `checks=${reason}`, "--waive", "codex=Codex is out of quota today"]
       );
       expect(result.exit).toBe(0);
@@ -1493,8 +1710,8 @@ describe("merge-gate", () => {
         `comment owner/repo#1 merge-gate: the lead waived these missing gate checks to merge ${repos.head}.\n\n- checks: ${reason}\n- codex: Codex is out of quota today`
       );
       expect(posted).toBeLessThan(result.calls.findIndex((call) => call.startsWith("merge ")));
-      expect(result.log().split("\n")[1]).toEndWith(
-        `\tmerge\tmerged\t\t[{"kind":"waiver","id":"checks","reason":"${reason}"},{"kind":"waiver","id":"codex","reason":"Codex is out of quota today"}]`
+      expect(result.log().split("\n")[1]).toContain(
+        `\tmerge\tmerged\t\t[{"kind":"waiver","id":"checks","reason":"${reason}"},{"kind":"waiver","id":"codex","reason":"Codex is out of quota today"}]\t`
       );
     });
 
