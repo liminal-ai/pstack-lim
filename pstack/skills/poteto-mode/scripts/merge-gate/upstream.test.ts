@@ -245,6 +245,15 @@ describe("instruction files that match the declared upstream commit", () => {
     );
   });
 
+  it("refuses the PR's own commit declared as upstream, though the gate's clone already has it", async () => {
+    const result = await gate(sync.forkEdit, declares(sync.forkEdit));
+    expect(result.exit).toBe(1);
+    expect(result.merged).toBe(false);
+    expect(result.out).toContain(
+      `${sync.forkEdit.slice(0, 7)} is not on pingdotgg/t3code's default branch, whose tip is ${sync.upstreamCommit.slice(0, 7)}.`
+    );
+  });
+
   it("refuses a declared commit the upstream repo does not serve", async () => {
     const result = await gate(sync.head, declares("0".repeat(40)));
     expect(result.exit).toBe(1);

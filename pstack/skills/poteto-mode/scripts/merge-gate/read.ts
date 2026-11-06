@@ -143,8 +143,10 @@ function readInstructionFiles(
       "that names this PR's own repo. Fix the line to name the upstream repo the PR syncs from."
     );
   const url = `https://github.com/${upstream.owner}/${upstream.repo}.git`;
+  let tip: string;
   try {
-    git.fetch(url, [upstream.sha]);
+    tip = git.remoteHead(url);
+    git.fetch(url, [tip, upstream.sha]);
   } catch (error) {
     if (!(error instanceof ReadError)) throw error;
     return refused(
@@ -154,6 +156,10 @@ function readInstructionFiles(
   if (!git.isAncestor(upstream.sha, head))
     return refused(
       `${short(upstream.sha)} is not an ancestor of the PR's head ${short(head)}. Fix the line to name the upstream commit the PR merges.`
+    );
+  if (!git.isAncestor(upstream.sha, tip))
+    return refused(
+      `${short(upstream.sha)} is not on ${upstream.owner}/${upstream.repo}'s default branch, whose tip is ${short(tip)}. Fix the line to name the upstream commit the PR merges.`
     );
   const fromUpstream = paths.filter(
     (path) => git.blobAt(head, path) === git.blobAt(upstream.sha, path)

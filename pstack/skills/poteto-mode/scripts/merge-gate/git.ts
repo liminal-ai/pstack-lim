@@ -135,6 +135,14 @@ export class Git {
     return sha;
   }
 
+  /** The commit the remote's HEAD names, as the remote itself advertises it. */
+  remoteHead(remote: string): string {
+    const sha = this.git(["ls-remote", remote, "HEAD"]).split("\t")[0] ?? "";
+    if (!/^[0-9a-f]{40}$/.test(sha))
+      throw new ReadError(`remote ${remote} advertises no HEAD`);
+    return sha;
+  }
+
   /** Fetches commits by SHA. GitHub serves any commit in the repo this way, including ones a force-push left behind. */
   fetch(remote: string, shas: readonly string[]): void {
     const absent = shas.filter(
