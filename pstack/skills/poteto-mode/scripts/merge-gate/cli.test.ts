@@ -604,19 +604,14 @@ describe("merge-gate", () => {
       );
     });
 
-    it("carries an acceptance at the review's head to a rebased head the review carries, and refuses one at any other head", async () => {
+    it("carries an acceptance with the review it names, whichever head it was posted at, across rebases the review carries", async () => {
       const review = reviewComment(repos.oldHead, repos.c0);
-      const carried = await gate({
-        comments: [review, acceptComment(review, repos.oldHead), codexComment(repos.head)],
-      });
-      expect(carried.exit).toBe(0);
-      const elsewhere = await gate({
-        comments: [review, acceptComment(review, repos.changedHead), codexComment(repos.head)],
-      });
-      expect(elsewhere.exit).toBe(1);
-      expect(acceptLine(elsewhere.out)).toContain(
-        `is at ${repos.changedHead.slice(0, 7)}, neither the PR's head ${repos.head.slice(0, 7)} nor the review's ${repos.oldHead.slice(0, 7)}`
-      );
+      for (const postedAt of [repos.oldHead, repos.changedHead]) {
+        const result = await gate({
+          comments: [review, acceptComment(review, postedAt), codexComment(repos.head)],
+        });
+        expect(result.exit).toBe(0);
+      }
     });
 
     it("refuses a malformed acceptance line", async () => {

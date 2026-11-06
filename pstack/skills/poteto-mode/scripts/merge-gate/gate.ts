@@ -912,11 +912,6 @@ const acceptance: Requirement = {
         `The latest acceptance (${fact.url}) names the review ${fact.review}, not the one the gate reads (${reviewed.url}). The lead judges that review and posts a new acceptance:`,
         postLines
       );
-    if (fact.head !== pull.headRefOid && fact.head !== reviewed.head)
-      return unmet(
-        `The latest acceptance (${fact.url}) is at ${short(fact.head)}, neither the PR's head ${short(pull.headRefOid)} nor the review's ${short(reviewed.head)}. The lead posts a new acceptance:`,
-        postLines
-      );
     const listed = new Set(reviewed.issues.map(({ n }) => n));
     const given = fact.issues.map(({ n }) => n);
     const repeated = [
