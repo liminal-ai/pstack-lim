@@ -25,7 +25,7 @@ Each reviewer and the synthesizer name a role line in the role file (`~/lim-v2/A
 | Tooling | `reflect tooling` | `cursor/grok-4.7 reasoning_effort=xhigh fastMode=true` | `references/tooling-reviewer.md` |
 | Divergent | `reflect judgment, divergent, synthesizer` | `claudeAgent/claude-opus-5-5 effort=xhigh` | `references/divergent-reviewer.md` |
 
-Pass each template verbatim, substituting the thread ID or digest where marked. Each reviewer's findings are its final message, which `task_status` returns.
+The judgment reviewer also reviews each written justification the lead made in the thread: each issue it let stand or deferred, each failed box it accepted, and each skip, shortcut or changed bar it accepted. It judges each choice against the whole thread, so later rounds can see where the lead's judgment holds and where it does not. Pass each template verbatim, substituting the thread ID or digest where marked. Each reviewer's findings are its final message, which `task_status` returns.
 
 ## 3. Synthesize
 

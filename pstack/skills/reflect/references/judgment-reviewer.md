@@ -15,6 +15,10 @@ Scan for:
 - Friction in skill execution, orchestration, or delegation
 - Repeated manual steps that could be automated or encoded
 
+## The lead's written justifications
+
+Find each written justification the lead made: every `pstack-accept:` comment on a PR the transcript names (read it with `gh pr view <pr> --comments`, read-only) and every place in the transcript where the lead let an issue stand, deferred it, accepted a failed box, a skip or a shortcut, or changed a bar. Look most closely at medium and high issues. For each, read the whole thread around it: the verifier's evidence, what the lead checked, and what happened after, such as a later finding, a fix, a revert, or the user overruling it. Give feedback on the choice: sound, unsound, or can't tell, with the evidence and one or two sentences on why. Report these as their own numbered list, under the heading `Justifications`, after your observations.
+
 ## What to report
 
 Report what happened, not lessons. For each observation:
