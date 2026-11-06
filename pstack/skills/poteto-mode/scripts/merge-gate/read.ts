@@ -112,14 +112,13 @@ export async function readFacts(
     acceptance,
     plan,
     accepted: asked.accepted,
-    instructionFiles: readInstructionFiles(git, pr, baseTip, mergeBase, head, upstream),
+    instructionFiles: readInstructionFiles(git, pr, mergeBase, head, upstream),
   };
 }
 
 function readInstructionFiles(
   git: Git,
   pr: PrRef,
-  baseTip: string,
   mergeBase: string,
   head: string,
   upstream: UpstreamRef | null
@@ -162,12 +161,14 @@ function readInstructionFiles(
     return refused(
       `${short(upstream.sha)} is not on ${upstream.owner}/${upstream.repo}'s default branch, whose tip is ${short(tip)}. Fix the line to name the commit on that branch that the PR merges.`
     );
-  const lastSync = git.mergeBase(baseTip, upstream.sha);
-  const fromUpstream = paths.filter(
-    (path) =>
-      git.blobAt(head, path) === git.blobAt(upstream.sha, path) &&
-      git.blobAt(mergeBase, path) === git.blobAt(lastSync, path)
-  );
+  const lastSyncs = git.mergeBases(mergeBase, upstream.sha);
+  const fromUpstream = paths.filter((path) => {
+    const atBase = git.entryAt(mergeBase, path);
+    return (
+      git.entryAt(head, path) === git.entryAt(upstream.sha, path) &&
+      lastSyncs.some((sync) => git.entryAt(sync, path) === atBase)
+    );
+  });
   const rest = paths.filter((path) => !fromUpstream.includes(path));
   const matched = fromUpstream.length === 0 ? null : { upstream, paths: fromUpstream };
   if (matched !== null && rest.length === 0) return { kind: "all-upstream", matched };

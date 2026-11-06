@@ -173,12 +173,17 @@ export class Git {
   }
 
   /** The blob id at `path` in `commit`, or null when the commit has no file there. */
-  blobAt(commit: string, path: string): string | null {
+  /** The path's tree entry as `<mode> <blob>`, so a symlink never matches a regular file with the same bytes. */
+  entryAt(commit: string, path: string): string | null {
     const entry = this.git(["ls-tree", "-z", "--full-tree", commit, "--", path], {
       GIT_LITERAL_PATHSPECS: "1",
     });
-    const match = /^\d+ blob ([0-9a-f]+)\t/.exec(entry);
-    return match === null ? null : match[1];
+    const match = /^(\d+) blob ([0-9a-f]+)\t/.exec(entry);
+    return match === null ? null : `${match[1]} ${match[2]}`;
+  }
+
+  mergeBases(a: string, b: string): string[] {
+    return this.git(["merge-base", "--all", a, b]).split("\n").filter((sha) => sha !== "");
   }
 
   verdictHash(base: string, head: string): HashResult {
