@@ -33,7 +33,7 @@ Only edit the verification skill's own directory (its SKILL.md, features/, and a
 
 5. **Triage.** Wrong or missing user-POV description → doc drift, fix it. Working behavior the harness can't drive → harness gap, fix it; a harness fix follows the same helpers rule as generation (scripts executable, invocation documented in the skill body). App behavior that's actually broken → product gap; record it for the user, keep it out of this PR.
 
-6. **Merge brief.** Read `.agents/merge-brief.md` against the repo as it is now: the gate's merge method, the verify skill and features a verdict must drive, the checks that must pass, and any repo-specific gate. Correct what drifted. A repo with no merge brief gets one, per `/create-verification-skill` step 5.
+6. **Merge brief.** Read `.agents/merge-brief.md` against the repo as it is now: the gate's merge method, the verify skill and features a review must drive, the checks that must pass, and any repo-specific gate. Correct what drifted. A repo with no merge brief gets one, per `/create-verification-skill` step 5.
 
 7. **Ship or stop.** For changed: one PR of proven corrections, re-read every changed file first. For clean or blocked: no PR, report the outcome and the coverage honestly.
 
