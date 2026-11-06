@@ -18,7 +18,7 @@ interface Output {
   readonly stderr: string;
 }
 
-const sameRepo = (a: Repository, b: Repository): boolean =>
+export const sameRepo = (a: Repository, b: Repository): boolean =>
   a.owner.toLowerCase() === b.owner.toLowerCase() &&
   a.repo.toLowerCase() === b.repo.toLowerCase();
 
@@ -154,6 +154,23 @@ export class Git {
 
   mergeBase(a: string, b: string): string {
     return this.git(["merge-base", a, b]).trim();
+  }
+
+  isAncestor(ancestor: string, of: string): boolean {
+    const result = this.exec(["git", "merge-base", "--is-ancestor", ancestor, of]);
+    if (result.code === 0 || result.code === 1) return result.code === 0;
+    throw new ReadError(
+      `git merge-base --is-ancestor ${ancestor} ${of} failed: ${result.stderr.trim().split("\n")[0] ?? ""}`
+    );
+  }
+
+  /** The blob id at `path` in `commit`, or null when the commit has no file there. */
+  blobAt(commit: string, path: string): string | null {
+    const entry = this.git(["ls-tree", "-z", "--full-tree", commit, "--", path], {
+      GIT_LITERAL_PATHSPECS: "1",
+    });
+    const match = /^\d+ blob ([0-9a-f]+)\t/.exec(entry);
+    return match === null ? null : match[1];
   }
 
   verdictHash(base: string, head: string): HashResult {
