@@ -43,9 +43,9 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /**
- * pingdotgg/t3code and the fork, as #76 met them. Both start from a commit with the vendored files'
- * old text. Upstream's commit applies #76's real diff to them; the fork's main moves on its own,
- * and the PR merges the upstream commit into it.
+ * pingdotgg/t3code and the fork, as #76 met them. The last sync point is an upstream commit with the
+ * vendored files' old text. The fork's main descends from it, edits the root AGENTS.md and adds a
+ * fork-only docs/AGENTS.md. Upstream's next commit applies #76's real diff, and the PR merges it.
  */
 interface Sync {
   readonly gate: string;
@@ -59,6 +59,10 @@ interface Sync {
   readonly forkEdit: string;
   /** head plus a fork-root AGENTS.md change. */
   readonly forkRoot: string;
+  /** head with the fork's edited root AGENTS.md set back to upstream's text. */
+  readonly takesUpstream: string;
+  /** head without the fork-only docs/AGENTS.md. */
+  readonly deletesForkOnly: string;
 }
 
 function makeSync(): Sync {
@@ -83,7 +87,7 @@ function makeSync(): Sync {
   };
 
   write("README.md", "root\n");
-  write("AGENTS.md", "fork rules\n");
+  write("AGENTS.md", "upstream rules\n");
   for (const [path, fixture] of [
     [ALCHEMY, "alchemy-effect.agents-md.txt"],
     [OLD_AWS, "alchemy-aws.agents-md.txt"],
@@ -93,15 +97,17 @@ function makeSync(): Sync {
     copyFileSync(join(FIXTURES, fixture), join(work, path));
     git(work, "add", path);
   }
-  const shared = commit("vendored files, old text");
+  const lastSync = commit("upstream with the vendored files' old text");
 
   git(work, "apply", "--index", join(FIXTURES, "instruction-files-76.patch"));
   const upstreamCommit = commit("chore(repos): sync Effect 4.1.2 and Alchemy beta.85, rename effect-smol");
-  git(work, "checkout", "--quiet", "--detach", shared);
+  git(work, "checkout", "--quiet", "--detach", lastSync);
   write("upstream.txt", "elsewhere\n");
   const unmerged = commit("an upstream commit the PR does not merge");
 
-  git(work, "checkout", "--quiet", "--detach", shared);
+  git(work, "checkout", "--quiet", "--detach", lastSync);
+  write("AGENTS.md", "fork rules\n");
+  write("docs/AGENTS.md", "fork only\n");
   write("fork.txt", "fork moved\n");
   const main = commit("fork moves");
   git(work, "merge", "--quiet", "--no-ff", "-m", "merge upstream", upstreamCommit);
@@ -111,10 +117,16 @@ function makeSync(): Sync {
   git(work, "checkout", "--quiet", "--detach", head);
   write("AGENTS.md", "fork rules, edited\n");
   const forkRoot = commit("fork edits its own AGENTS.md");
+  git(work, "checkout", "--quiet", "--detach", head);
+  write("AGENTS.md", "upstream rules\n");
+  const takesUpstream = commit("fork takes upstream's root AGENTS.md");
+  git(work, "checkout", "--quiet", "--detach", head);
+  git(work, "rm", "--quiet", "docs/AGENTS.md");
+  const deletesForkOnly = commit("fork deletes its own docs/AGENTS.md");
 
   git(work, "push", "--quiet", upstream, `${upstreamCommit}:refs/heads/main`, `${unmerged}:refs/heads/side`);
   git(work, "push", "--quiet", fork, `${main}:refs/heads/main`);
-  for (const [index, sha] of [head, forkEdit, forkRoot].entries()) {
+  for (const [index, sha] of [head, forkEdit, forkRoot, takesUpstream, deletesForkOnly].entries()) {
     git(work, "push", "--quiet", fork, `${sha}:refs/tmp/${index}`);
     git(fork, "update-ref", "-d", `refs/tmp/${index}`);
   }
@@ -123,7 +135,7 @@ function makeSync(): Sync {
   git(gate, "remote", "add", "origin", "https://github.com/owner/repo.git");
   git(gate, "config", `url.${join(root, "fork")}.insteadOf`, "https://github.com/owner/repo");
   git(gate, "config", `url.${join(root, "upstream")}.insteadOf`, "https://github.com/pingdotgg/t3code");
-  return { gate, fork, main, upstreamCommit, unmerged, head, forkEdit, forkRoot };
+  return { gate, fork, main, upstreamCommit, unmerged, head, forkEdit, forkRoot, takesUpstream, deletesForkOnly };
 }
 
 let sync: Sync;
@@ -206,6 +218,29 @@ describe("instruction files that match the declared upstream commit", () => {
     expect(result.out).toContain("The PR changes AGENTS.md. Show Lee");
     expect(result.out).toContain(
       `lee-approves-instruction-files: ${approvalHash(sync.forkRoot, ["AGENTS.md"])}`
+    );
+  });
+
+  it("refuses the fork's edited root AGENTS.md set back to upstream's text byte for byte", async () => {
+    expect(git(sync.fork, "rev-parse", `${sync.takesUpstream}:AGENTS.md`)).toBe(
+      git(sync.fork, "rev-parse", `${sync.upstreamCommit}:AGENTS.md`)
+    );
+    const result = await gate(sync.takesUpstream, declares(sync.upstreamCommit));
+    expect(result.exit).toBe(1);
+    expect(result.merged).toBe(false);
+    expect(result.out).toContain("The PR changes AGENTS.md. Show Lee");
+    expect(result.out).toContain(
+      `\n  lee-approves-instruction-files: ${approvalHash(sync.takesUpstream, ["AGENTS.md"])}\n`
+    );
+  });
+
+  it("refuses deleting a fork-only AGENTS.md that upstream never had", async () => {
+    const result = await gate(sync.deletesForkOnly, declares(sync.upstreamCommit));
+    expect(result.exit).toBe(1);
+    expect(result.merged).toBe(false);
+    expect(result.out).toContain("The PR changes docs/AGENTS.md. Show Lee");
+    expect(result.out).toContain(
+      `\n  lee-approves-instruction-files: ${approvalHash(sync.deletesForkOnly, ["docs/AGENTS.md"])}\n`
     );
   });
 

@@ -199,7 +199,10 @@ export interface UpstreamRef extends Repository {
   readonly sha: string;
 }
 
-/** Changed instruction files whose text at head is the upstream commit's, so they need no approval. */
+/**
+ * Changed instruction files that need no approval: each is the upstream commit's at head, and was upstream's
+ * at the PR's merge base as of the last sync point, so the fork never wrote or edited it.
+ */
 export interface UpstreamMatch {
   readonly upstream: UpstreamRef;
   readonly paths: readonly string[];
