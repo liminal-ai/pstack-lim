@@ -250,14 +250,14 @@ describe("instruction files that match the declared upstream commit", () => {
     expect(result.exit).toBe(1);
     expect(result.merged).toBe(false);
     expect(result.out).toContain(
-      `${sync.forkEdit.slice(0, 7)} is not on pingdotgg/t3code's default branch, whose tip is ${sync.upstreamCommit.slice(0, 7)}.`
+      `${sync.forkEdit.slice(0, 7)} is not on pingdotgg/t3code's default branch, whose tip is ${sync.upstreamCommit.slice(0, 7)}. Fix the line to name the commit on that branch that the PR merges.`
     );
   });
 
   it("refuses a declared commit the upstream repo does not serve", async () => {
     const result = await gate(sync.head, declares("0".repeat(40)));
     expect(result.exit).toBe(1);
-    expect(result.out).toContain("that commit could not be fetched from https://github.com/pingdotgg/t3code.git");
+    expect(result.out).toContain("the gate could not read that commit and the default branch's tip from https://github.com/pingdotgg/t3code.git");
   });
 
   for (const [what, body] of [

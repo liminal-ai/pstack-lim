@@ -150,7 +150,7 @@ function readInstructionFiles(
   } catch (error) {
     if (!(error instanceof ReadError)) throw error;
     return refused(
-      `that commit could not be fetched from ${url}: ${error.message}. Fix the line to name a commit in the upstream repo.`
+      `the gate could not read that commit and the default branch's tip from ${url}: ${error.message}. Fix the line to name a commit in the upstream repo.`
     );
   }
   if (!git.isAncestor(upstream.sha, head))
@@ -159,7 +159,7 @@ function readInstructionFiles(
     );
   if (!git.isAncestor(upstream.sha, tip))
     return refused(
-      `${short(upstream.sha)} is not on ${upstream.owner}/${upstream.repo}'s default branch, whose tip is ${short(tip)}. Fix the line to name the upstream commit the PR merges.`
+      `${short(upstream.sha)} is not on ${upstream.owner}/${upstream.repo}'s default branch, whose tip is ${short(tip)}. Fix the line to name the commit on that branch that the PR merges.`
     );
   const fromUpstream = paths.filter(
     (path) => git.blobAt(head, path) === git.blobAt(upstream.sha, path)
