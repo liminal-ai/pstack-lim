@@ -31,4 +31,6 @@ Only product or ops decisions that cannot wait for the next round, such as a run
 
 Each observation dropped, with the reason in one sentence.
 
+Keep the judgment reviewer's `Justifications` list as its own section of the record, after checking each item's evidence, so later rounds can compare the lead's choices across threads.
+
 Keep the tooling reviewer's "Project verify skill and merge brief" list as its own section of the record, after checking each item against the transcript. The thread fixes those in its closing upkeep pass, so they are not proposals for the round.
