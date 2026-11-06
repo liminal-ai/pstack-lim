@@ -18,7 +18,7 @@ interface Output {
   readonly stderr: string;
 }
 
-const sameRepo = (a: Repository, b: Repository): boolean =>
+export const sameRepo = (a: Repository, b: Repository): boolean =>
   a.owner.toLowerCase() === b.owner.toLowerCase() &&
   a.repo.toLowerCase() === b.repo.toLowerCase();
 
@@ -135,6 +135,14 @@ export class Git {
     return sha;
   }
 
+  /** The commit the remote's HEAD names, as the remote itself advertises it. */
+  remoteHead(remote: string): string {
+    const sha = this.git(["ls-remote", remote, "HEAD"]).split("\t")[0] ?? "";
+    if (!/^[0-9a-f]{40}$/.test(sha))
+      throw new ReadError(`remote ${remote} advertises no HEAD`);
+    return sha;
+  }
+
   /** Fetches commits by SHA. GitHub serves any commit in the repo this way, including ones a force-push left behind. */
   fetch(remote: string, shas: readonly string[]): void {
     const absent = shas.filter(
@@ -154,6 +162,28 @@ export class Git {
 
   mergeBase(a: string, b: string): string {
     return this.git(["merge-base", a, b]).trim();
+  }
+
+  isAncestor(ancestor: string, of: string): boolean {
+    const result = this.exec(["git", "merge-base", "--is-ancestor", ancestor, of]);
+    if (result.code === 0 || result.code === 1) return result.code === 0;
+    throw new ReadError(
+      `git merge-base --is-ancestor ${ancestor} ${of} failed: ${result.stderr.trim().split("\n")[0] ?? ""}`
+    );
+  }
+
+  /** The blob id at `path` in `commit`, or null when the commit has no file there. */
+  /** The path's tree entry as `<mode> <blob>`, so a symlink never matches a regular file with the same bytes. */
+  entryAt(commit: string, path: string): string | null {
+    const entry = this.git(["ls-tree", "-z", "--full-tree", commit, "--", path], {
+      GIT_LITERAL_PATHSPECS: "1",
+    });
+    const match = /^(\d+) blob ([0-9a-f]+)\t/.exec(entry);
+    return match === null ? null : `${match[1]} ${match[2]}`;
+  }
+
+  mergeBases(a: string, b: string): string[] {
+    return this.git(["merge-base", "--all", a, b]).split("\n").filter((sha) => sha !== "");
   }
 
   verdictHash(base: string, head: string): HashResult {

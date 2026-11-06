@@ -1,11 +1,13 @@
 import {
   type Facts,
   type HashResult,
+  type InstructionFiles,
   type PlanRef,
   type PrRef,
   type ReviewFact,
   type AcceptanceFact,
   declaredPlan,
+  declaredUpstream,
   findAcceptance,
   findReview,
   hasOldVerdictLine,
@@ -14,10 +16,12 @@ import {
   parseAcceptance,
   parseReviewBody,
   parseReviewLine,
+  short,
   speaksForRepo,
+  type UpstreamRef,
 } from "./gate.ts";
 import type { Git } from "./git.ts";
-import { ReadError } from "./git.ts";
+import { ReadError, sameRepo } from "./git.ts";
 import type { GitHub } from "./github.ts";
 import { resolvePlan } from "./plan.ts";
 
@@ -45,6 +49,11 @@ export async function readFacts(
       `the PR body's plan declaration does not read as one pstack-plan: <plan file> pr=<PR id> line: ${declared.malformed}. Fix the body so the gate can check the plan.`
     );
   const plan = resolvePlan(asked.plan, declared, asked.cwd);
+  const upstream = declaredUpstream(pull.body);
+  if (upstream !== null && "malformed" in upstream)
+    throw new ReadError(
+      `the PR body's upstream declaration does not read as one pstack-upstream: <owner>/<repo>@<40-hex commit sha> line: ${upstream.malformed}. Fix the body so the gate can compare the instruction files with that commit.`
+    );
   const [checks, threads, baseUsesMergeQueue] = await Promise.all([
     github.checks(pr, head),
     github.openThreads(pr),
@@ -89,9 +98,6 @@ export async function readFacts(
         ? { kind: "malformed", line: record.line, url: record.url }
         : { kind: "found", ...parsedAcceptance, url: record.url };
 
-  const instructionPaths = git
-    .changedPaths(mergeBase, head)
-    .filter(isInstructionFile);
   return {
     pr,
     defaultBranch,
@@ -106,13 +112,71 @@ export async function readFacts(
     acceptance,
     plan,
     accepted: asked.accepted,
-    instructionFiles:
-      instructionPaths.length === 0
-        ? null
-        : {
-            paths: instructionPaths,
-            approvalHash: git.diffHash(mergeBase, head, instructionPaths),
-          },
+    instructionFiles: readInstructionFiles(git, pr, mergeBase, head, upstream),
+  };
+}
+
+function readInstructionFiles(
+  git: Git,
+  pr: PrRef,
+  mergeBase: string,
+  head: string,
+  upstream: UpstreamRef | null
+): InstructionFiles | null {
+  const paths = git.changedPaths(mergeBase, head).filter(isInstructionFile);
+  if (paths.length === 0) return null;
+  if (upstream === null)
+    return {
+      kind: "changed",
+      paths,
+      approvalHash: git.diffHash(mergeBase, head, paths),
+      matched: null,
+    };
+  const refused = (problem: string): InstructionFiles => ({
+    kind: "upstream-refused",
+    paths,
+    upstream,
+    problem,
+  });
+  if (sameRepo(upstream, pr))
+    return refused(
+      "that names this PR's own repo. Fix the line to name the upstream repo the PR syncs from."
+    );
+  const url = `https://github.com/${upstream.owner}/${upstream.repo}.git`;
+  let tip: string;
+  try {
+    tip = git.remoteHead(url);
+    git.fetch(url, [tip, upstream.sha]);
+  } catch (error) {
+    if (!(error instanceof ReadError)) throw error;
+    return refused(
+      `the gate could not read that commit and the default branch's tip from ${url}: ${error.message}. Fix the line to name a commit in the upstream repo.`
+    );
+  }
+  if (!git.isAncestor(upstream.sha, head))
+    return refused(
+      `${short(upstream.sha)} is not an ancestor of the PR's head ${short(head)}. Fix the line to name the upstream commit the PR merges.`
+    );
+  if (!git.isAncestor(upstream.sha, tip))
+    return refused(
+      `${short(upstream.sha)} is not on ${upstream.owner}/${upstream.repo}'s default branch, whose tip is ${short(tip)}. Fix the line to name the commit on that branch that the PR merges.`
+    );
+  const lastSyncs = git.mergeBases(mergeBase, upstream.sha);
+  const fromUpstream = paths.filter((path) => {
+    const atBase = git.entryAt(mergeBase, path);
+    return (
+      git.entryAt(head, path) === git.entryAt(upstream.sha, path) &&
+      lastSyncs.some((sync) => git.entryAt(sync, path) === atBase)
+    );
+  });
+  const rest = paths.filter((path) => !fromUpstream.includes(path));
+  const matched = fromUpstream.length === 0 ? null : { upstream, paths: fromUpstream };
+  if (matched !== null && rest.length === 0) return { kind: "all-upstream", matched };
+  return {
+    kind: "changed",
+    paths: rest,
+    approvalHash: git.diffHash(mergeBase, head, rest),
+    matched,
   };
 }
 

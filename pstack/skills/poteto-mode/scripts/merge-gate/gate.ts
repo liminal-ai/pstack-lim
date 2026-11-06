@@ -194,10 +194,36 @@ export type AcceptanceFact =
       readonly unreadLines: readonly string[];
     };
 
-export interface InstructionFiles {
-  readonly paths: readonly string[];
-  readonly approvalHash: string;
+/** The upstream commit a sync PR merges, as the PR body's `pstack-upstream: <owner>/<repo>@<sha>` line names it. */
+export interface UpstreamRef extends Repository {
+  readonly sha: string;
 }
+
+/**
+ * Changed instruction files that need no approval: each is the upstream commit's at head, and was upstream's
+ * at the PR's merge base as of the last sync point, so the fork never wrote or edited it.
+ */
+export interface UpstreamMatch {
+  readonly upstream: UpstreamRef;
+  readonly paths: readonly string[];
+}
+
+/** The AGENTS.md and CLAUDE.md changes, judged against the declared upstream commit when there is one. */
+export type InstructionFiles =
+  | {
+      readonly kind: "changed";
+      readonly paths: readonly string[];
+      /** Covers `paths` only, never the files that match upstream. */
+      readonly approvalHash: string;
+      readonly matched: UpstreamMatch | null;
+    }
+  | { readonly kind: "all-upstream"; readonly matched: UpstreamMatch }
+  | {
+      readonly kind: "upstream-refused";
+      readonly paths: readonly string[];
+      readonly upstream: UpstreamRef;
+      readonly problem: string;
+    };
 
 /** Everything the requirements judge, read once at the PR's current head. */
 export interface Facts {
@@ -272,6 +298,9 @@ export const isDeferOwner = (owner: string): boolean =>
   LINEAR_ID.test(owner) || WORKFLOW_STEP.test(owner);
 const PLAN_PREFIX = "pstack-plan:";
 const PLAN_DECLARATION = /^pstack-plan: (\S(?:.*\S)?) pr=(\S+)$/;
+const UPSTREAM_PREFIX = "pstack-upstream:";
+const UPSTREAM_DECLARATION =
+  /^pstack-upstream: ([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)@([0-9a-f]{40})$/;
 const APPROVAL_PREFIX = "lee-approves-instruction-files:";
 const APPROVED_IN = /^approved-in: \S+$/;
 const CODEX_LOGINS = new Set([
@@ -450,6 +479,20 @@ export function declaredPlan(
     return { malformed: `${declared.length} plan lines (${declared.join(" | ")}); a PR declares one plan` };
   const match = PLAN_DECLARATION.exec(declared[0]);
   return match === null ? { malformed: declared[0] } : { path: match[1], pr: match[2] };
+}
+
+/** The PR body's one `pstack-upstream: <owner>/<repo>@<40-hex sha>` line, read by the same rules as `declaredPlan`. */
+export function declaredUpstream(
+  body: string
+): UpstreamRef | { readonly malformed: string } | null {
+  const declared = lines(body).filter((line) => line.startsWith(UPSTREAM_PREFIX));
+  if (declared.length === 0) return null;
+  if (declared.length > 1)
+    return { malformed: `${declared.length} upstream lines (${declared.join(" | ")}); a PR declares one upstream commit` };
+  const match = UPSTREAM_DECLARATION.exec(declared[0]);
+  return match === null
+    ? { malformed: declared[0] }
+    : { owner: match[1], repo: match[2], sha: match[3] };
 }
 
 export function strayAcceptances(facts: Facts): string[] {
@@ -1020,6 +1063,17 @@ const instructionApproval: Requirement = {
   evaluate({ instructionFiles, comments }) {
     if (instructionFiles === null)
       return met("no AGENTS.md or CLAUDE.md changes");
+    const upstreamName = ({ owner, repo, sha }: UpstreamRef): string =>
+      `${owner}/${repo}@${short(sha)}`;
+    const matchedNote = ({ upstream, paths }: UpstreamMatch): string =>
+      `${paths.join(", ")} match ${upstreamName(upstream)} byte for byte and need no approval`;
+    if (instructionFiles.kind === "upstream-refused")
+      return unmet(
+        `The PR changes ${instructionFiles.paths.join(", ")} and declares pstack-upstream: ${instructionFiles.upstream.owner}/${instructionFiles.upstream.repo}@${instructionFiles.upstream.sha}, but ${instructionFiles.problem}`
+      );
+    if (instructionFiles.kind === "all-upstream")
+      return met(matchedNote(instructionFiles.matched));
+    const { matched } = instructionFiles;
     const line = `${APPROVAL_PREFIX} ${instructionFiles.approvalHash}`;
     const approved = comments.some((comment) => {
       const body = lines(comment.body);
@@ -1032,11 +1086,16 @@ const instructionApproval: Requirement = {
     });
     if (approved)
       return met(
-        `Lee approved the exact text of ${instructionFiles.paths.join(", ")}`
+        `Lee approved the exact text of ${instructionFiles.paths.join(", ")}${matched === null ? "" : `; ${matchedNote(matched)}`}`
       );
     return unmet(
       `The PR changes ${instructionFiles.paths.join(", ")}. Show Lee that exact text in a T3 thread. Once Lee approves it there, the agent that showed it posts one comment with these lines, Lee's words quoted. Never post it without Lee's approval in chat:`,
-      [line, "approved-in: <T3 thread id>", "> <Lee's words>"]
+      [
+        line,
+        "approved-in: <T3 thread id>",
+        "> <Lee's words>",
+        ...(matched === null ? [] : [`(not part of the approval: ${matchedNote(matched)})`]),
+      ]
     );
   },
 };
