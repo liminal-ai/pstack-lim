@@ -561,7 +561,7 @@ function acceptanceRecord({ review, acceptance }: Facts): AcceptanceRecord | und
           ? disposition.sha
           : disposition.kind === "stands"
             ? disposition.why
-            : disposition.owner,
+            : `${disposition.owner}. ${disposition.why}`,
     })),
     bars: acceptance.bars,
   };

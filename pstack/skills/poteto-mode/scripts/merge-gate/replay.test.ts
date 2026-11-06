@@ -134,26 +134,26 @@ describe("replays of real reviews against the review and acceptance gate", () =>
       `missing: Lead's acceptance. The lead has not accepted the review (${round1.url}). The lead judges each issue, then posts one comment at this head:`,
     ]);
     expect(result.out).toContain(
-      `  pstack-accept: head=${repos.head} review=${round1.url} by=<your model>\n  checked: <what you ran or read yourself>\n  issue 1: fixed in <sha> | stands. <why it does not block> | deferred to <owner>\n  issue 2: `
+      `  pstack-accept: head=${repos.head} review=${round1.url} by=<your model>\n  checked: <what you ran or read yourself>\n  issue 1: fixed in <sha> | stands. <why it does not block> | deferred to <owner>. <why it can wait>\n  issue 2: `
     );
   });
 
   it("long-horizon-context #59, verify-lhc retrieval.md:23: a doc-only fix gets a review at the new head, with shortcuts for unrelated lanes, and merges on their acceptance", async () => {
     const before = review(repos.head, repos.main, [
       "box docs: done. Read the verify skills against main.",
-      "issue 1 low: retrieval.md:23 says an oversized item slices only when 256 tokens remain, which reads as wrong to a reader who skips fromToken.",
+      "issue 1 low: retrieval.md:23 says a long or bracketed prompt keeps its cleaned text, which overstates the bracket exemption. bracketed-prompt.log: a real 91-character bracketed prompt was smoothed after intake and drain. handlers.ts:52 exempts only an entire bracketed marker with 1 to 80 interior characters, or a prompt above the inference token guard.",
     ]);
     const atFix = review(repos.docHead, repos.main, [
-      "box docs: done. Read retrieval.md:23 against src/retrieval's slice rule; the sentence now matches it.",
+      "box docs: done. retrieval.md:23 now reads \"a short bracketed marker or a prompt above the inference token guard\", which matches handlers.ts:52, and the 91-character bracketed probe still smooths.",
       "shortcut retrieval: the live retrieval lane was not rerun; it carries the review at 494cf6a. Only retrieval.md changed, which the lane's helper does not read.",
       "shortcut thread-round-trip: not rerun; carries the review at 494cf6a. No code, config or verify step it runs changed.",
     ]);
     const result = await replay(
       [
         before,
-        acceptance(repos.head, before, ["checked: read retrieval.md:23"]),
+        acceptance(repos.head, before, ["checked: read retrieval.md:23 against handlers.ts:52"]),
         atFix,
-        acceptance(repos.docHead, atFix, ["checked: read the changed sentence and the slice rule in src/retrieval"]),
+        acceptance(repos.docHead, atFix, ["checked: read the changed sentence against handlers.ts:52"]),
       ],
       [
         "--accept-shortcut", "retrieval=only the doc changed",

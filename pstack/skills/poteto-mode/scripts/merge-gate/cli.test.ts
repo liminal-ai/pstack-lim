@@ -510,8 +510,8 @@ describe("merge-gate", () => {
         [
           `  pstack-accept: head=${repos.head} review=${review.url} by=<your model>`,
           "  checked: <what you ran or read yourself>",
-          "  issue 1: fixed in <sha> | stands. <why it does not block> | deferred to <owner>",
-          "  issue 2: fixed in <sha> | stands. <why it does not block> | deferred to <owner>",
+          "  issue 1: fixed in <sha> | stands. <why it does not block> | deferred to <owner>. <why it can wait>",
+          "  issue 2: fixed in <sha> | stands. <why it does not block> | deferred to <owner>. <why it can wait>",
           "",
         ].join("\n")
       );
@@ -527,7 +527,7 @@ describe("merge-gate", () => {
     it("refuses a high or medium issue with no line, and needs none for a low one", async () => {
       const result = await accepting(reviewComment(repos.head, repos.main, issues), [
         "checked: reproduced issue 1",
-        "issue 1: deferred to LH-215",
+        "issue 1: deferred to LH-215. The money path ships behind a flag next week.",
       ]);
       expect(result.exit).toBe(1);
       expect(acceptLine(result.out)).toContain("1 issue has no line.");
@@ -540,7 +540,7 @@ describe("merge-gate", () => {
         "checked: reproduced issue 1 with two paid links",
         "issue 1: fixed in abc1234",
         "- issue 2: stands. Stripe's redelivery converges it.",
-        "issue 3: deferred to mcp:launch:e22d/w1.7",
+        "issue 3: deferred to mcp:launch:e22d/w1.7. A wording fix with its own step.",
       ]);
       expect(result.exit).toBe(0);
       expect(result.out).toContain(
@@ -549,7 +549,7 @@ describe("merge-gate", () => {
           "  checked: reproduced issue 1 with two paid links",
           "  issue 1: fixed in abc1234",
           "  issue 2: stands. Stripe's redelivery converges it.",
-          "  issue 3: deferred to mcp:launch:e22d/w1.7",
+          "  issue 3: deferred to mcp:launch:e22d/w1.7. A wording fix with its own step.",
           "",
         ].join("\n")
       );
@@ -560,19 +560,21 @@ describe("merge-gate", () => {
       const result = await accepting(review, [
         "checked: read the evidence",
         "issue 1: stands.",
-        "issue 1: deferred to later",
+        "issue 1: deferred to LH-215",
         "issue 2: stands. fine",
         "issue 2: fixed in abc1234",
         "issue 9: stands. not in the review",
-        "issue 9: deferred to LH-215",
+        "issue 9: deferred to LH-215. owed",
         "box live-1: changed. 300 ms to 400 ms, Lee, a slower host",
         "box unit-1: changed",
+        "box unit-1: changed. ok",
       ]);
       expect(result.exit).toBe(1);
-      expect(acceptLine(result.out)).toContain("3 lines do not read as");
+      expect(acceptLine(result.out)).toContain("4 lines do not read as");
       expect(result.out).toContain("  unread: issue 1: stands.\n");
-      expect(result.out).toContain("  unread: issue 1: deferred to later\n");
+      expect(result.out).toContain("  unread: issue 1: deferred to LH-215\n");
       expect(result.out).toContain("  unread: box unit-1: changed\n");
+      expect(result.out).toContain("  unread: box unit-1: changed. ok\n");
       expect(result.out).toContain("  given more than once: issue 2 issue 9\n");
       expect(result.out).toContain("  not in the review: issue 9 box live-1\n");
       expect(result.out).toContain("  no line: issue 1 high:");

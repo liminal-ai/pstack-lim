@@ -166,7 +166,7 @@ export type ReviewFact =
 export type Disposition =
   | { readonly kind: "fixed"; readonly sha: string }
   | { readonly kind: "stands"; readonly why: string }
-  | { readonly kind: "deferred"; readonly owner: string };
+  | { readonly kind: "deferred"; readonly owner: string; readonly why: string };
 
 export interface IssueDisposition {
   readonly n: number;
@@ -259,8 +259,8 @@ const ISSUE_LINE = /^(?:[-*] )?issue (\d+) (high|medium|low): (\S.*)$/;
 const CHECKED_LINE = /^(?:[-*] )?checked: (\S.*)$/;
 const CHECKED_PREFIX = /^(?:[-*] )?checked:/;
 const DISPOSITION_LINE =
-  /^(?:[-*] )?issue (\d+): (?:fixed in ([0-9a-f]{7,40})|stands\. (\S.*)|deferred to (\S+))$/;
-const BAR_LINE = /^(?:[-*] )?box ([a-z]+(?:-\d+)?): changed\. (\S.*)$/;
+  /^(?:[-*] )?issue (\d+): (?:fixed in ([0-9a-f]{7,40})|stands\. (\S.*)|deferred to (\S+?)\. (\S.*))$/;
+const BAR_LINE = /^(?:[-*] )?box ([a-z]+(?:-\d+)?): changed\. (\S.* to \S.*, \S.*, \S.*)$/;
 export const SHORTCUT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SHORTCUT_LINE = /^(?:[-*] )?shortcut ([a-z0-9]+(?:-[a-z0-9]+)*): (\S.*)$/;
 const SHORTCUT_PREFIX = /^(?:[-*] )?shortcut\b/i;
@@ -423,7 +423,7 @@ export function parseAcceptance(
             : found[3] !== undefined
               ? { kind: "stands", why: found[3].trim() }
               : isDeferOwner(found[4])
-                ? { kind: "deferred", owner: found[4] }
+                ? { kind: "deferred", owner: found[4], why: found[5].trim() }
                 : null;
       if (found === null || disposition === null) unreadLines.push(entry);
       else issues.push({ n: Number(found[1]), disposition });
@@ -854,7 +854,7 @@ const shortcuts: Requirement = {
 };
 
 export const ACCEPT_FORMS =
-  '"checked: <what you ran or read yourself>", "issue <n>: fixed in <sha>", "issue <n>: stands. <why it does not block>", "issue <n>: deferred to <owner>" with <owner> ' +
+  '"checked: <what you ran or read yourself>", "issue <n>: fixed in <sha>", "issue <n>: stands. <why it does not block>", "issue <n>: deferred to <owner>. <why it can wait>" with <owner> ' +
   DEFER_OWNER_FORMS +
   ', or "box <id>: changed. <earlier bar> to <new bar>, <who changed it>, <why>"';
 
@@ -878,7 +878,7 @@ const dispositionLine = ({ n, disposition }: IssueDisposition): string =>
     ? `issue ${n}: fixed in ${disposition.sha}`
     : disposition.kind === "stands"
       ? `issue ${n}: stands. ${disposition.why}`
-      : `issue ${n}: deferred to ${disposition.owner}`;
+      : `issue ${n}: deferred to ${disposition.owner}. ${disposition.why}`;
 
 const acceptance: Requirement = {
   name: "Lead's acceptance",
@@ -894,7 +894,7 @@ const acceptance: Requirement = {
       "checked: <what you ran or read yourself>",
       ...owed.map(
         ({ n }) =>
-          `issue ${n}: fixed in <sha> | stands. <why it does not block> | deferred to <owner>`
+          `issue ${n}: fixed in <sha> | stands. <why it does not block> | deferred to <owner>. <why it can wait>`
       ),
     ];
     if (fact.kind === "none")
@@ -960,7 +960,7 @@ const acceptance: Requirement = {
     }
     if (undecided.length > 0) {
       parts.push(
-        `${undecided.length} issue${undecided.length === 1 ? " has" : "s have"} no line. Each high and medium issue, and the issue of each failed box, needs "issue <n>: fixed in <sha>", "issue <n>: stands. <why>" or "issue <n>: deferred to <owner>"`
+        `${undecided.length} issue${undecided.length === 1 ? " has" : "s have"} no line. Each high and medium issue, and the issue of each failed box, needs "issue <n>: fixed in <sha>", "issue <n>: stands. <why>" or "issue <n>: deferred to <owner>. <why>"`
       );
       details.push(
         ...undecided.map(({ n, severity, text }) => `no line: issue ${n} ${severity}: ${text}`)
