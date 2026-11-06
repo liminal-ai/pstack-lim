@@ -20,16 +20,21 @@ import { parsePrNumber } from "../watch-pr/types.ts";
 import {
   type Acceptances,
   type Accepted,
+  ACCEPT_FORMS,
+  type BarChange,
   BOX_FORMS,
   BOX_ID,
   type CheckWaiver,
   type Deferral,
   DEFER_OWNER_FORMS,
+  type Disposition,
   type Facts,
+  ISSUE_FORM,
   type PlanRef,
   type PrRef,
   SHORTCUT_FORM,
   SHORTCUT_ID,
+  type Severity,
   evaluate,
   isDeferOwner,
   missingNames,
@@ -84,10 +89,25 @@ interface RunRecord {
     | "error";
   readonly missing: readonly string[];
   readonly accepted: readonly AcceptedEntry[];
+  /** On a merge, the review and the lead's acceptance it merged on. */
+  readonly acceptance?: AcceptanceRecord;
 }
 
-const LOG_HEADER = "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived\n";
-const OLD_LOG_HEADER = "ts\trepo\tpr\thead\tmode\toutcome\tmissing\n";
+export interface AcceptanceRecord {
+  readonly review: string;
+  readonly accept: string;
+  readonly by: string;
+  readonly issues: readonly {
+    readonly n: number;
+    readonly severity: Severity;
+    readonly disposition: Disposition["kind"];
+    /** The reason a stand, a deferral's owner, or a fix's SHA. */
+    readonly detail: string;
+  }[];
+  readonly bars: readonly BarChange[];
+}
+
+const LOG_HEADER = "ts\trepo\tpr\thead\tmode\toutcome\tmissing\twaived\tacceptance\n";
 
 export function parseRepo(value: string): Repository {
   const match = /^([\w.-]+)\/([\w.-]+)$/.exec(value);
@@ -168,7 +188,7 @@ function collectCheckWaiver(
   const reason = at === -1 ? "" : value.slice(at + 1).trim();
   if (!WAIVABLE_CHECKS.includes(check))
     throw new InvalidArgumentError(
-      `"${check}" is not a check the lead may waive. Waivable: ${WAIVABLE_CHECKS.join(", ")}. The verdict, plan boxes, open and mergeable, auto-merge, review decision and instruction-file approval are never waived`
+      `"${check}" is not a check the lead may waive. Waivable: ${WAIVABLE_CHECKS.join(", ")}. The review, the lead's acceptance, plan boxes, open and mergeable, auto-merge, review decision and instruction-file approval are never waived`
     );
   if (reason === "")
     throw new InvalidArgumentError(`check ${check} needs a reason: --waive ${check}=<reason>`);
@@ -226,24 +246,24 @@ function parseArgs(argv: readonly string[], runtime: Runtime): Options {
     )
     .option(
       "--plan <file>",
-      "the PR's plan; the verdict must list every verify box of its section. Without it, the gate uses the plan the PR body declares on a line \"pstack-plan: <file> pr=<id>\""
+      "the PR's plan; the review must list every verify box of its section. Without it, the gate uses the plan the PR body declares on a line \"pstack-plan: <file> pr=<id>\""
     )
     .option("--plan-pr <id>", "the PR id that ends the section's title, such as GC2")
     .option(
       "--accept-skip <id=reason>",
-      "the lead accepts the verdict's skipped box <id> as not applying, for <reason>; repeatable, posted on the PR before the merge",
+      "the lead accepts the review's skipped box <id> as not applying, for <reason>; repeatable, posted on the PR before the merge",
       collectSkip,
       []
     )
     .option(
       "--defer <id=owner>",
-      "the lead defers the verdict's skipped box <id>, whose work is owed, to <owner>: a Linear id such as LH-215 or an open workflow step <thread id>/w<n>.<n>; repeatable, posted on the PR before the merge",
+      "the lead defers the review's skipped box <id>, whose work is owed, to <owner>: a Linear id such as LH-215 or an open workflow step <thread id>/w<n>.<n>; repeatable, posted on the PR before the merge",
       collectDeferral,
       []
     )
     .option(
       "--accept-shortcut <id=reason>",
-      "the lead accepts the shortcut <id> the verdict lists, for <reason>; repeatable, posted on the PR before the merge",
+      "the lead accepts the shortcut <id> the review lists, for <reason>; repeatable, posted on the PR before the merge",
       collectShortcut,
       []
     )
@@ -258,8 +278,8 @@ function parseArgs(argv: readonly string[], runtime: Runtime): Options {
     `
 Run "merge-gate audit --help" for the audit of merges against gate receipts.
 
-The verdict lists each plan box under its pstack-verdict line as ${BOX_FORMS}.
-A changed box counts only when it names who accepted the changed bar and why, separated by the first comma.
+The review lists each plan box under its pstack-review line as ${BOX_FORMS}, and each issue as ${ISSUE_FORM}.
+The lead's pstack-accept line names the review, and under it come ${ACCEPT_FORMS}.
 A re-verification that did not rerun something lists each shortcut as ${SHORTCUT_FORM}.
 `
   );
@@ -313,8 +333,10 @@ function appendRun(runtime: Runtime, run: RunRecord): void {
   if (!existsSync(file)) appendFileSync(file, LOG_HEADER);
   else {
     const text = readFileSync(file, "utf8");
-    if (text.startsWith(OLD_LOG_HEADER))
-      writeFileSync(file, LOG_HEADER + text.slice(OLD_LOG_HEADER.length));
+    const header = text.slice(0, text.indexOf("\n") + 1);
+    // An older log's header is this one cut short; its rows read the newer columns as empty.
+    if (header !== LOG_HEADER && LOG_HEADER.startsWith(header.slice(0, -1)))
+      writeFileSync(file, LOG_HEADER + text.slice(header.length));
   }
   const row = [
     runtime.now().toISOString(),
@@ -325,6 +347,7 @@ function appendRun(runtime: Runtime, run: RunRecord): void {
     run.outcome,
     run.missing.join("; "),
     run.accepted.length === 0 ? "" : JSON.stringify(run.accepted),
+    run.acceptance === undefined ? "" : JSON.stringify(run.acceptance),
   ];
   appendFileSync(file, `${row.map(cell).join("\t")}\n`);
 }
@@ -386,7 +409,7 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
   if (stray.length > 0)
     return {
       exit: EXIT.error,
-      text: `ERROR: ${at}\nAn acceptance names a box the verdict did not skip, a shortcut it does not list, or a check that holds, so nothing was merged. Accept or defer only the boxes the verdict lists as skipped, accept only the shortcuts it lists, and waive only the checks the gate finds missing.\n${stray.map((line) => `  ${line}`).join("\n")}\n`,
+      text: `ERROR: ${at}\nAn acceptance names a box the review did not skip, a shortcut it does not list, or a check that holds, so nothing was merged. Accept or defer only the boxes the review lists as skipped, accept only the shortcuts it lists, and waive only the checks the gate finds missing.\n${stray.map((line) => `  ${line}`).join("\n")}\n`,
       run: { ...run, outcome: "error", missing: stray.map((line) => `usage: ${line}`) },
     };
   const evaluations = evaluate(facts);
@@ -438,10 +461,10 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
     );
   if (
     Object.values(options.accepted).some((given) => given.length > 0) &&
-    fresh.verdict.kind === "found"
+    fresh.review.kind === "found"
   ) {
     const posted = await runtime.github
-      .comment(pr, acceptanceComment(fresh.verdict, head, options.accepted))
+      .comment(pr, acceptanceComment(fresh.review, head, options.accepted))
       .catch((error: unknown): WriteAttempt => ({
         ok: false,
         detail: message(error),
@@ -485,7 +508,12 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
         `MERGED: ${at} into ${after.baseRefName}${commit}`,
         evaluations
       ),
-      run: { ...run, outcome: "merged", missing: [] },
+      run: {
+        ...run,
+        outcome: "merged",
+        missing: [],
+        acceptance: acceptanceRecord(fresh),
+      },
     };
   if (!attempt.ok && after.state === "MERGED")
     return {
@@ -505,7 +533,7 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
   );
 }
 
-/** The repo's own merge rules, printed before any verdict; a failed read is reported and never blocks. */
+/** The repo's own merge rules, printed before any review; a failed read is reported and never blocks. */
 async function mergeBrief(github: GitHub, repo: Repository): Promise<string> {
   const name = `${repo.owner}/${repo.repo}`;
   try {
@@ -518,8 +546,29 @@ async function mergeBrief(github: GitHub, repo: Repository): Promise<string> {
   }
 }
 
+function acceptanceRecord({ review, acceptance }: Facts): AcceptanceRecord | undefined {
+  if (review.kind !== "found" || acceptance.kind !== "found") return undefined;
+  return {
+    review: review.url,
+    accept: acceptance.url,
+    by: acceptance.by,
+    issues: acceptance.issues.map(({ n, disposition }) => ({
+      n,
+      severity: review.issues.find((issue) => issue.n === n)?.severity ?? "low",
+      disposition: disposition.kind,
+      detail:
+        disposition.kind === "fixed"
+          ? disposition.sha
+          : disposition.kind === "stands"
+            ? disposition.why
+            : `${disposition.owner}. ${disposition.why}`,
+    })),
+    bars: acceptance.bars,
+  };
+}
+
 function acceptanceComment(
-  verdict: Extract<Facts["verdict"], { kind: "found" }>,
+  review: Extract<Facts["review"], { kind: "found" }>,
   head: string,
   { skips, deferrals, shortcuts, checks }: Acceptances
 ): string {
@@ -528,18 +577,18 @@ function acceptanceComment(
     if (lines.length > 0) sections.push([title, "", ...lines]);
   };
   section(
-    `merge-gate: the lead waived these skipped boxes of the verdict ${verdict.url} to merge ${head}.`,
+    `merge-gate: the lead waived these skipped boxes of the review ${review.url} to merge ${head}.`,
     skips.map(({ id, reason }) => `- ${id}: ${reason}`)
   );
   section(
-    `merge-gate: the lead deferred these skipped boxes of the verdict ${verdict.url} to their owners to merge ${head}.`,
+    `merge-gate: the lead deferred these skipped boxes of the review ${review.url} to their owners to merge ${head}.`,
     deferrals.map(({ id, owner }) => {
-      const note = verdict.boxes.find((box) => box.id === id)?.note ?? "";
+      const note = review.boxes.find((box) => box.id === id)?.note ?? "";
       return `- ${id}: ${owner}${note === "" ? "" : `. Owed: ${note}`}`;
     })
   );
   section(
-    `merge-gate: the lead accepted these shortcuts the verdict ${verdict.url} lists to merge ${head}.`,
+    `merge-gate: the lead accepted these shortcuts the review ${review.url} lists to merge ${head}.`,
     shortcuts.map(({ id, reason }) => `- ${id}: ${reason}`)
   );
   section(

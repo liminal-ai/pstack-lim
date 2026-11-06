@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { Command, CommanderError, InvalidArgumentError } from "commander";
 import type { Repository } from "../watch-pr/types.ts";
 import {
+  type AcceptanceRecord,
   EXIT,
   type Runtime,
   message,
@@ -221,14 +222,23 @@ function acceptedOnMerges(
     )
       return [];
     seen.add(key);
-    return readWaivedCell(row.waived ?? "").map(({ kind, id, reason }) => [
-      row.repo,
-      `#${row.pr}`,
-      short(row.head),
-      kind,
-      id,
-      reason,
-    ]);
+    const at = [row.repo, `#${row.pr}`, short(row.head)];
+    // Receipts from before the review and acceptance records have no acceptance cell.
+    const acceptance: AcceptanceRecord | null = row.acceptance
+      ? (JSON.parse(row.acceptance) as AcceptanceRecord)
+      : null;
+    return [
+      ...readWaivedCell(row.waived ?? "").map(({ kind, id, reason }) => [...at, kind, id, reason]),
+      ...(acceptance?.issues ?? [])
+        .filter(({ disposition }) => disposition !== "fixed")
+        .map(({ n, severity, disposition, detail }) => [
+          ...at,
+          disposition,
+          `issue ${n} ${severity}`,
+          detail,
+        ]),
+      ...(acceptance?.bars ?? []).map(({ id, change }) => [...at, "changed", id, change]),
+    ];
   });
   if (entries.length === 0) return [];
   return [

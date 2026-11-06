@@ -104,6 +104,47 @@ describe("merge-gate audit", () => {
     );
   });
 
+  it("lists the issues the lead let stand or deferred and the bars it changed, and still reads a receipt without them", async () => {
+    const acceptance = JSON.stringify({
+      review: "https://github.com/owner/repo/pull/2#issuecomment-1",
+      accept: "https://github.com/owner/repo/pull/2#issuecomment-2",
+      by: "claude-opus-5-5",
+      issues: [
+        { n: 1, severity: "high", disposition: "stands", detail: "the plan let the owner pick the layout" },
+        { n: 2, severity: "medium", disposition: "deferred", detail: "LH-215" },
+        { n: 3, severity: "high", disposition: "fixed", detail: "abc1234" },
+      ],
+      bars: [{ id: "perf", change: "under 300 ms to under 400 ms, Lee, the host is shared" }],
+    });
+    const log = join(mkdtempSync(join(tmpdir(), "merge-gate-accept-")), "runs.tsv");
+    writeFileSync(
+      log,
+      [
+        `${HEADER}\tacceptance`,
+        row("owner/repo", 1, A),
+        ["2026-10-16T00:00:00.000Z", "owner/repo", "2", B, "merge", "merged", "", "", acceptance].join("\t"),
+        "",
+      ].join("\n")
+    );
+    const result = await runAudit(null, { "owner/repo": [pull(1, A), pull(2, B)] }, [
+      "--repo",
+      "owner/repo",
+      "--log",
+      log,
+    ]);
+    expect(result.exit).toBe(0);
+    expect(result.out).toContain(
+      [
+        "What the lead accepted on gated merges since 2026-10-10:",
+        "repo        PR  head     kind      id              reason or owner",
+        "owner/repo  #2  bbbbbbb  stands    issue 1 high    the plan let the owner pick the layout",
+        "owner/repo  #2  bbbbbbb  deferred  issue 2 medium  LH-215",
+        "owner/repo  #2  bbbbbbb  changed   perf            under 300 ms to under 400 ms, Lee, the host is shared",
+        "Wrote ",
+      ].join("\n")
+    );
+  });
+
   it("takes receipts from another machine's --log and exits 0 when every merge has one", async () => {
     const other = join(mkdtempSync(join(tmpdir(), "merge-gate-dgx-")), "runs.tsv");
     writeFileSync(other, `${HEADER}\n${row("Owner/Repo", 2, B)}\n`);
