@@ -928,7 +928,7 @@ const acceptance: Requirement = {
         .map((id) => `box ${id}`),
     ];
     const unlisted = [
-      ...given.filter((n) => !listed.has(n)).map((n) => `issue ${n}`),
+      ...[...new Set(given)].filter((n) => !listed.has(n)).map((n) => `issue ${n}`),
       ...fact.bars
         .filter(({ id }) => !reviewed.boxes.some((box) => box.id === id))
         .map(({ id }) => `box ${id}`),

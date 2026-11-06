@@ -564,6 +564,7 @@ describe("merge-gate", () => {
         "issue 2: stands. fine",
         "issue 2: fixed in abc1234",
         "issue 9: stands. not in the review",
+        "issue 9: deferred to LH-215",
         "box live-1: changed. 300 ms to 400 ms, Lee, a slower host",
         "box unit-1: changed",
       ]);
@@ -572,7 +573,7 @@ describe("merge-gate", () => {
       expect(result.out).toContain("  unread: issue 1: stands.\n");
       expect(result.out).toContain("  unread: issue 1: deferred to later\n");
       expect(result.out).toContain("  unread: box unit-1: changed\n");
-      expect(result.out).toContain("  given more than once: issue 2\n");
+      expect(result.out).toContain("  given more than once: issue 2 issue 9\n");
       expect(result.out).toContain("  not in the review: issue 9 box live-1\n");
       expect(result.out).toContain("  no line: issue 1 high:");
     });
