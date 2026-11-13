@@ -1,10 +1,10 @@
 # Cleanup protocol
 
-Every workflow's last step. A cleanup agent finds what the run left behind, keeps the proof, removes what is clearly from the run, and lists the rest for the lead. The user sees only what is not clearly from the run.
+Every run's last step. A cleanup agent finds what the run left behind, keeps the proof, removes what is clearly from the run, and lists the rest for the lead. The user sees only what is not clearly from the run.
 
 ## At the start of the run
 
-The lead does this in the workflow's first step, before anything is created:
+The lead does this in the run's first step, before anything is created:
 
 1. Name the run with a short slug and make its folder, `<project>/.pstack/runs/<run>/` with `scratch/` and `proof/`, per poteto-mode's Run folder section.
 2. Take the before snapshot: `~/.agents/skills/poteto-mode/scripts/footprint.sh snapshot <run folder> before <each repo the run may touch>`. It records listening ports, user services, Tailscale routes, containers, tmux sessions, the user's top-level `/tmp` entries, and each repo's worktrees, branches and stashes.
@@ -27,4 +27,4 @@ The cleanup agent works in this order:
 5. **Remove what is clearly from the run.** An item is clearly from the run when the record shows this run created it, nothing cites it, and it holds no state that exists nowhere else. A backup, a copy of a config or of data taken before a change, a database dump, and anything that would undo an edit outside git are never clearly disposable, cited or not. They go on the lead's list. Stop each process and service by the PID or unit the record names, never by matching a name or a path. Remove a worktree only when `git status` shows it clean, and a branch only when it is merged or its PR is closed. Delete schedules by their id. Leave the run folder's `proof/` in place. Delete each file in `scratch/` that is clearly from the run, and delete `scratch/` itself only once it is empty. Anything left there is on the lead's list.
 6. **List the rest for the lead.** Everything not clearly from the run goes on the list with its evidence: every backup or pre-change copy, with what it would restore, a dirty worktree, an item the snapshot shows but the record does not explain, data in an app the user uses, a debug leftover inside a PR that is already merged, and every printed secret, which needs rotation because removing the text does not un-print it.
 
-The cleanup agent's final message has three parts. **Removed** names each item with the evidence that it was from the run. **Kept as proof** names each file and where it is cited. **For the lead** lists the rest. The lead removes or checks what it can, and asks the user about only what it cannot settle, on the workflow with `thread_workflow_ask`.
+The cleanup agent's final message has three parts. **Removed** names each item with the evidence that it was from the run. **Kept as proof** names each file and where it is cited. **For the lead** lists the rest. The lead removes or checks what it can. It asks the user in chat about only what it cannot settle.
