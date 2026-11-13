@@ -2,7 +2,7 @@
 
 **You run the program, never the code. Decide which agent does each piece of work, then check what each one produces.** For a standing project handed to one coordinator chat: multi-day, many stacked PRs, dozens to hundreds of subagents, few human turns. One task driven to a predicate is Autonomous run. One ambitious run that needs a bespoke workflow is figure-it-out. Work you would do yourself inside the session's budget is not a program. Work split across workers that each own a unit is one, however small it looks.
 
-Run it with your own tools. Spawn workers with `delegate_task`. Keep the program's state in the thread workflow and in `orchestrate/<project-slug>/` in the pstack store (the `pstack store` line in the role file). Watch each PR with `watch_pull_request` and a fallback heartbeat, per the Waking and polling section of the role file. Call no scripts, run no polling loops, and never relay messages or status between agents.
+Run it with your own tools. Spawn workers with `delegate_task`. Keep the program's state in `orchestrate/<project-slug>/` in the pstack store (the `pstack store` line in the role file). Watch each PR with `watch_pull_request` and a fallback heartbeat, per the Waking and polling section of the role file. Call no scripts, run no polling loops, and never relay messages or status between agents.
 
 #### Topology
 
