@@ -6,12 +6,12 @@ Run it with your own tools. Spawn workers with `delegate_task`. Keep the program
 
 #### Topology
 
-- **One owner per PR.** The owner is the only writer of its branch and carries the PR from build to merge. Only the owner pushes, rebases, or retargets it. Closing or retargeting a base PR orphans every PR above it, so the owner does that only on your call. You never author or edit code. Conflicted merges, chain rebases, and fixes go to owners.
-- **A fresh worker for each independent task.** Its kickoff carries everything it needs, including each upstream report it depends on, pasted in full. Workers can't see their siblings. Run workers on the `cloud workers` line in the role file unless the work needs this machine: a `control-ui` or `control-cli` runtime check, this project's T3 threads, a simulator, or auth that exists only here. Pick each subagent's effort for the job, per the Subagents section.
+- **One implementer per PR at a time.** Only it pushes while it runs. You hold the PR between rounds. Closing or retargeting a base PR orphans every PR above it, so no implementer does it without your call. You never author or edit code. Conflicted merges, chain rebases, and fixes go to implementers.
+- **A fresh worker for each independent task.** Its kickoff carries everything it needs, including each upstream report it depends on, pasted in full. Workers can't see their siblings. Pick each subagent's effort for the job, per the Subagents section.
 - **A sub-coordinator only when one area has many parallel workers.** It owns that area's workers and kickoffs and sends you one rollup, never raw worker reports. Stop at three levels: you, sub-coordinators, and workers. Keep about ten workers in flight per coordinator, and start the next one as each finishes instead of waiting on a whole batch.
-- **Message the worker when new work needs its built state,** such as its checkout, uncommitted changes, or a running process, because T3 can't fork a worker, and a branch carries no uncommitted changes or running process. Otherwise message a worker only for a follow-up on the same work. Never message one to check on it, because a message restarts an idle agent.
-- **Each PR gets a verifier that isn't its author,** on a different model family. The owner merges only on your acceptance at the current head, after that verifier's review.
-- **Start with one unit.** Take it through kickoff, owner, verifier, and merge before you fan out, so a flaw in the kickoff costs one agent instead of fifty. On near-identical cheap units, the first unit is that test.
+- **Message the worker when new work that is not a fix round needs its built state,** such as its checkout, uncommitted changes, or a running process, because T3 can't fork a worker, and a branch carries no uncommitted changes or running process. Never message one to check on it, because a message restarts an idle agent.
+- **Each PR gets a verifier that isn't its author,** on a different model family. Land it per `playbooks/shipping.md`.
+- **Start with one unit.** Take it through kickoff, implementer, verifier, and merge before you fan out, so a flaw in the kickoff costs one agent instead of fifty. On near-identical cheap units, the first unit is that test.
 
 #### Supervision
 

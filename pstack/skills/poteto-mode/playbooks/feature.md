@@ -16,6 +16,6 @@
 7. If the design is contested, `interrogate` before shipping.
 8. Run **Opening a PR**.
 
-Code-coupled work (one feature, one migration) goes to a single owner with the checkpoint inline. That owner fans out internally after the blocking phase. Parent-level fan-out is for slices that produce independent artifacts (audits, cross-subsystem investigations, competing experiments). Rewrite the checkpoint at phase boundaries. Spawn a fresh owner rather than chaining interrupts.
+Parent-level fan-out is for slices that produce independent artifacts (audits, cross-subsystem investigations, competing experiments). Rewrite the checkpoint at phase boundaries.
 
 **Reply:** catch the operator up per the **ketchup** skill, covering what you built, what you chose and why, the throughput checkpoint, open decisions. Tables for design alternatives.

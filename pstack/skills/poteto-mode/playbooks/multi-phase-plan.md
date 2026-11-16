@@ -1,6 +1,6 @@
 ### Multi-phase or multi-PR plan
 
-**You own the plan, not the code. The plan is a checklist an owner runs box by box and the operator audits from the evidence.** The plan is the deliverable. Do not implement.
+**You own the plan, not the code. The plan is a checklist the lead runs box by box and the operator audits from the evidence.** The plan is the deliverable. Do not implement.
 
 1. When the change is one or two files with an obvious approach, skip the plan. Say so and stop.
 2. Settle open questions by prototype before you write. Run `playbooks/prototype.md` for each. Keep the branch, the SHA, and the screenshots for Appendix A. Ask the operator only about a product or preference call that no run can settle. Give options (the **never-block-on-the-human** principle skill).
@@ -26,7 +26,7 @@
 
 One box is one unit of work. Every box names the evidence that checks it. A nested box is a sub-step of the box above it. Check a box only when its evidence exists, a file, a log line, a screenshot, a test run, or a SHA. The body is a how-to. The appendices explain and record.
 
-The program runs `pstack/skills/poteto-mode/playbooks/<execution playbook>.md`. <Who merges, and which PR ids are the operator's items that stop at merge-ready.>
+The program runs `pstack/skills/poteto-mode/playbooks/<execution playbook>.md`. <Which PR ids are the operator's items that stop at merge-ready, per `playbooks/shipping.md` step 4 for the rest.>
 
 Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
@@ -45,11 +45,11 @@ This plan is the record of done. A review covers each verify box by its `check-p
   - [ ] `git -C ~/lim-v2/code/liminal-plugins/pstack-lim show origin/lim:pstack/skills/<each other leaf skill the program uses>`
 - [ ] On the operator's go, arm the audit tick with the tick prompt below, by the wake mechanism in the role file (`~/lim-v2/AGENTS.md` or `~/lim-v2/CLAUDE.md`). That is a 55-minute T3 `schedule_task`, which keeps a Claude root's one-hour prompt cache warm, in a Claude root too, whose `scheduledTaskId` you keep and delete when no delegated work is left. Never leave the cadence to memory.
 - [ ] Use this tick prompt, verbatim. "Re-read the execution playbook from trunk. Audit the operation against it and fix drift in this tick. Probe every active lane and judge progress by side effects only. Stand down a stuck lane and dispatch its replacement now. Then post a short status message to the operator in chat only when the audit found a tracked change that no earlier status message reported, such as a PR opened, a code-ready head, a round launched or closed, a review, an acceptance, a merge, a stuck agent and the action taken, a blocker added or cleared, or a decision only the operator can make. Name every such change and nothing else. Do not repeat a table, the merged list, or an unchanged blocker. If the audit found none, end the turn with no reply text. Either way, log this tick's row in your decision trail. The row names the items reported, or none."
-- [ ] On the operator's hold or stand-down, send every owner a zero-writes order at once.
+- [ ] On the operator's hold or stand-down, send every running child a zero-writes order at once.
 
-### Spawn owners
+### Brief implementers
 
-- [ ] Spawn one owner per PR with the full lifecycle the execution playbook names.
+- [ ] Brief one implementer per PR to build, check its own work, and return.
 - [ ] Follow this dependency graph. Start dependent work only after its parent merges, or base it on the parent branch when the execution playbook stacks.
   - [ ] <PR id> and <PR id> are independent and first. Both branch from `main`.
   - [ ] <PR id> after <PR id>.
@@ -74,7 +74,7 @@ This plan is the record of done. A review covers each verify box by its `check-p
 
 ### Boot recipe, for every live lane
 
-Each live lane runs on its own cloud VM (the `cloud workers` line in the role file (`~/lim-v2/AGENTS.md` or `~/lim-v2/CLAUDE.md`)) at the PR head. Drive through the project's verify skill, or `control-ui` or `control-cli` when it has none.
+Each live lane runs in its own worktree at the PR head. Drive through the project's verify skill, or `control-ui` or `control-cli` when it has none.
 
 - [ ] `git fetch origin <head-branch> && git checkout <head SHA>`.
 - [ ] <Start what the verify skill starts, if anything. Wait for ready.>
@@ -131,7 +131,7 @@ Each live lane runs on its own cloud VM (the `cloud workers` line in the role fi
 - [ ] Root's acceptance at the exact head SHA, naming the verifier's review.
 - [ ] Bugbot triage done.
 - [ ] Rebased onto current trunk after the review, whole-PR diff unchanged per `playbooks/shipping.md` step 3.
-- [ ] <The owner squash-merges its own PR, or the root appends it to the base-branch stack and the operator lands it bottom-up.>
+- [ ] Land per `playbooks/shipping.md` step 4, or stop at verified under the execution playbook.
 
 ## Close the program
 
@@ -150,7 +150,7 @@ Each live lane runs on its own cloud VM (the `cloud workers` line in the role fi
 
 ## Appendix C. Risks
 
-<Each risk with the PR it lands in and what the owner watches.>
+<Each risk with the PR it lands in and what the lead watches.>
 
 ## Appendix D. Links and reading list
 
