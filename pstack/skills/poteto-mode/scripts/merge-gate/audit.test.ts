@@ -104,6 +104,35 @@ describe("merge-gate audit", () => {
     );
   });
 
+  it("counts a merge on the operator's waiver as receipted and lists it as the operator's, not the lead's", async () => {
+    const words = "Lee: merge this without the usual review, it is docs only";
+    const result = await runAudit(
+      [
+        ["2026-10-16T00:00:00.000Z", "owner/repo", "1", A, "merge", "merged", "", JSON.stringify([
+          { kind: "operator-waiver", id: "review", reason: words },
+          { kind: "waiver", id: "codex", reason: "bot stuck" },
+        ])].join("\t"),
+      ],
+      { "owner/repo": [pull(1, A)] }
+    );
+    expect(result.exit).toBe(0);
+    expect(result.out).toContain(
+      [
+        "Every merge since 2026-10-10 has a gate receipt.",
+        "",
+        "owner/repo: 1 merge, 1 receipt, 0 without",
+        "",
+        "Merged on the operator's waiver of the review and the lead's acceptance since 2026-10-10:",
+        "repo        PR  head     operator's words",
+        `owner/repo  #1  aaaaaaa  ${words}`,
+        "What the lead accepted on gated merges since 2026-10-10:",
+        "repo        PR  head     kind    id     reason or owner",
+        "owner/repo  #1  aaaaaaa  waiver  codex  bot stuck",
+        "Wrote ",
+      ].join("\n")
+    );
+  });
+
   it("lists the issues the lead let stand or deferred and the bars it changed, and still reads a receipt without them", async () => {
     const acceptance = JSON.stringify({
       review: "https://github.com/owner/repo/pull/2#issuecomment-1",

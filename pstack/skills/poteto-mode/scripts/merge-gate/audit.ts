@@ -212,6 +212,7 @@ function acceptedOnMerges(
   since: string
 ): string[] {
   const seen = new Set<string>();
+  const operator: string[][] = [];
   const entries = rows.flatMap((row) => {
     const key = receiptKey(row.repo, row.pr, row.head);
     if (
@@ -227,8 +228,13 @@ function acceptedOnMerges(
     const acceptance: AcceptanceRecord | null = row.acceptance
       ? (JSON.parse(row.acceptance) as AcceptanceRecord)
       : null;
+    const waived = readWaivedCell(row.waived ?? "");
+    for (const { kind, reason } of waived)
+      if (kind === "operator-waiver") operator.push([...at, reason]);
     return [
-      ...readWaivedCell(row.waived ?? "").map(({ kind, id, reason }) => [...at, kind, id, reason]),
+      ...waived
+        .filter(({ kind }) => kind !== "operator-waiver")
+        .map(({ kind, id, reason }) => [...at, kind, id, reason]),
       ...(acceptance?.issues ?? [])
         .filter(({ disposition }) => disposition !== "fixed")
         .map(({ n, severity, disposition, detail }) => [
@@ -240,10 +246,19 @@ function acceptedOnMerges(
       ...(acceptance?.bars ?? []).map(({ id, change }) => [...at, "changed", id, change]),
     ];
   });
-  if (entries.length === 0) return [];
   return [
-    `What the lead accepted on gated merges since ${since}:`,
-    ...table([["repo", "PR", "head", "kind", "id", "reason or owner"], ...entries]),
+    ...(operator.length === 0
+      ? []
+      : [
+          `Merged on the operator's waiver of the review and the lead's acceptance since ${since}:`,
+          ...table([["repo", "PR", "head", "operator's words"], ...operator]),
+        ]),
+    ...(entries.length === 0
+      ? []
+      : [
+          `What the lead accepted on gated merges since ${since}:`,
+          ...table([["repo", "PR", "head", "kind", "id", "reason or owner"], ...entries]),
+        ]),
   ];
 }
 
