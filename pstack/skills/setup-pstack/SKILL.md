@@ -15,7 +15,7 @@ Call `orchestrator_capabilities`. Every model of a provider instance that can ru
 
 ### 2. Load current state
 
-The default role-to-model mapping is the block shape shown in step 5 below. If the role file already has the block, read it and treat its `# budget` line and its role values as the current choices. Otherwise start from those defaults. A line whose role is not in step 5, such as `how critics`, is from a retired role. Drop it. Two lines are not model roles, so keep them as they are: `cloud workers` (where cloud work runs) and a `counterparts` value (it points at the role file's Counterparts list).
+The default role-to-model mapping is the block shape shown in step 5 below. If the role file already has the block, read it and treat its `# budget` line and its role values as the current choices. Otherwise start from those defaults. A line whose role is not in step 5, such as `how critics`, is from a retired role. Drop it. One value is not a model role, so keep it as it is: a `counterparts` value (it points at the role file's Counterparts list).
 
 ### 3. Budget, map, and confirm
 
@@ -38,7 +38,7 @@ Never write Claude fast mode (`fastMode=true` on any Claude entry), even when th
 
 ### 5. Write the block
 
-Write the block into `~/lim-v2/AGENTS.md` only, with a `# budget` line with the chosen label and its target effort, and one line per role, using the same labels poteto-mode uses, then the `cloud workers` line. Replace the whole fenced block so re-runs stay idempotent. Leave the rest of the file as it is, including the notes under the block, and update a note only where it names a value you changed. Shape:
+Write the block into `~/lim-v2/AGENTS.md` only, with a `# budget` line with the chosen label and its target effort, and one line per role, using the same labels poteto-mode uses. Replace the whole fenced block so re-runs stay idempotent. Leave the rest of the file as it is, including the notes under the block, and update a note only where it names a value you changed. Shape:
 
 ```
 # pstack model configuration. One line per role. Delete a line to fall back to the skill default.
@@ -62,7 +62,6 @@ swarm workers: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
 architect runners: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
 interrogate reviewers: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
 design reviewers: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-cloud workers: cursor-cloud
 ```
 
 ### 6. Confirm

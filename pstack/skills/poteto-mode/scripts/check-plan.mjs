@@ -12,7 +12,7 @@ const RECORD_OF_DONE = "This plan is the record of done.";
 const LATER_WORK_TITLE = "Appendix. Later work and scope cuts";
 const LATER_WORK = ["Scope cuts.", "Decided no.", "Owed."];
 const CLOSE_MARKERS = ["Owed", "scope cut", "schedule_task"];
-const PROGRAM_H3 = ["Arm the program", "Spawn owners", "PR mechanics", "Verdict and merge", "Boot recipe"];
+const PROGRAM_H3 = ["Arm the program", "Brief implementers", "PR mechanics", "Review, acceptance and merge", "Boot recipe"];
 const PROGRAM_MARKERS = ["show origin/lim:", "status message"];
 const HOW_TO_READ_MARKERS = [
 	"One box is one unit of work",

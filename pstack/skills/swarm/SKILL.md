@@ -24,7 +24,7 @@ Open a todolist, where poteto-mode's Playbooks section puts it, with one entry p
 
 ## Phase B: Fan out
 
-Spawn all N workers in one message as `delegate_task` children (`mode: "async"`) with the step 4 model, left unset for `auto` or `inherit-parent`. Where they run follows the `cloud workers` line in the role file. Run a worker on this machine only when it needs access to something on the user's computer. A worker that builds, drives the app, or checks out a SHA gets its own worktree per poteto-mode's Subagents section.
+Spawn all N workers in one message as `delegate_task` children (`mode: "async"`) with the step 4 model, left unset for `auto` or `inherit-parent`. A worker that builds, drives the app, or checks out a SHA gets its own worktree per poteto-mode's Subagents section.
 
 When a worker must start from a non-default pushed branch, its brief names that branch.
 

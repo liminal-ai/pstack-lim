@@ -19,9 +19,9 @@ ${recordOfDone}
 
 ## Program checklist
 ### Arm the program
-### Spawn owners
+### Brief implementers
 ### PR mechanics
-### Verdict and merge
+### Review, acceptance and merge
 ### Boot recipe
 \`git show origin/lim:\` \`schedule_task\` status message
 
