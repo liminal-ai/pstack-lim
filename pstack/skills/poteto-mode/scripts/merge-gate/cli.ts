@@ -197,18 +197,38 @@ function collectCheckWaiver(
   return [...previous, { check, reason }];
 }
 
+function collectOperatorWords(value: string, previous: string | null): string {
+  if (previous !== null) throw new InvalidArgumentError("is given more than once");
+  const words = value.trim();
+  if (words === "")
+    throw new InvalidArgumentError(
+      'needs the operator\'s own words, such as --operator-waiver "merge this without the usual review"'
+    );
+  return words;
+}
+
 export interface AcceptedEntry {
-  readonly kind: "skip" | "defer" | "shortcut" | "waiver";
+  /** `operator-waiver` is the operator's word, never the lead's; its id is `review`. */
+  readonly kind: "skip" | "defer" | "shortcut" | "waiver" | "operator-waiver";
   readonly id: string;
-  /** The lead's reason, or a deferral's owner. */
+  /** The lead's reason, a deferral's owner, or the operator's words. */
   readonly reason: string;
 }
 
-const acceptedEntries = ({ skips, deferrals, shortcuts, checks }: Acceptances): AcceptedEntry[] => [
+const acceptedEntries = ({
+  skips,
+  deferrals,
+  shortcuts,
+  checks,
+  operatorWaiver,
+}: Acceptances): AcceptedEntry[] => [
   ...skips.map(({ id, reason }) => ({ kind: "skip" as const, id, reason })),
   ...deferrals.map(({ id, owner }) => ({ kind: "defer" as const, id, reason: owner })),
   ...shortcuts.map(({ id, reason }) => ({ kind: "shortcut" as const, id, reason })),
   ...checks.map(({ check, reason }) => ({ kind: "waiver" as const, id: check, reason })),
+  ...(operatorWaiver === null
+    ? []
+    : [{ kind: "operator-waiver" as const, id: "review", reason: operatorWaiver }]),
 ];
 
 /**
@@ -272,6 +292,12 @@ function parseArgs(argv: readonly string[], runtime: Runtime): Options {
       `the lead merges without the missing gate check <check> (${WAIVABLE_CHECKS.join(", ")}), for <reason>; repeatable, posted on the PR before the merge`,
       collectCheckWaiver,
       []
+    )
+    .option(
+      "--operator-waiver <words>",
+      "the operator waived the independent review and the lead's acceptance of this PR, in <words>, the operator's own words; only for a waiver the operator gave, and every other requirement still holds; posted on the PR before the merge",
+      collectOperatorWords,
+      null
     );
   program.addHelpText(
     "after",
@@ -295,6 +321,7 @@ A re-verification that did not rerun something lists each shortcut as ${SHORTCUT
     defer: Deferral[];
     acceptShortcut: Accepted[];
     waive: CheckWaiver[];
+    operatorWaiver: string | null;
   }>();
   if ((raw.plan === undefined) !== (raw.planPr === undefined))
     program.error("error: --plan and --plan-pr go together");
@@ -317,6 +344,7 @@ A re-verification that did not rerun something lists each shortcut as ${SHORTCUT
       deferrals: raw.defer,
       shortcuts: raw.acceptShortcut,
       checks: raw.waive,
+      operatorWaiver: raw.operatorWaiver,
     },
   };
 }
@@ -420,10 +448,14 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
       text: renderEvaluations(`REFUSED: ${at}`, evaluations),
       run: { ...run, outcome: "refused", missing },
     };
+  const onWaiver = (verb: string): string =>
+    options.accepted.operatorWaiver === null
+      ? ""
+      : `\n${verb} on the operator's waiver, with no independent review or lead's acceptance required. The operator's words: "${options.accepted.operatorWaiver}"`;
   if (options.check)
     return {
       exit: EXIT.merged,
-      text: renderEvaluations(`WOULD MERGE: ${at}`, evaluations),
+      text: renderEvaluations(`WOULD MERGE: ${at}${onWaiver("Would merge")}`, evaluations),
       run: { ...run, outcome: "would-merge", missing: [] },
     };
 
@@ -459,19 +491,17 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
     return notMerged(
       `Since the gate checked the PR, something the run waives came to hold (${freshStray.join("; ")}). Nothing was merged. Run the gate again.`
     );
-  if (
-    Object.values(options.accepted).some((given) => given.length > 0) &&
-    fresh.review.kind === "found"
-  ) {
+  if (acceptedEntries(options.accepted).length > 0) {
+    const review = fresh.review.kind === "found" ? fresh.review : null;
     const posted = await runtime.github
-      .comment(pr, acceptanceComment(fresh.review, head, options.accepted))
+      .comment(pr, acceptanceComment(review, head, options.accepted))
       .catch((error: unknown): WriteAttempt => ({
         ok: false,
         detail: message(error),
       }));
     if (!posted.ok)
       return notMerged(
-        `The lead's waivers could not be posted on the PR (${posted.detail}), and a waiver counts only when the PR records it. Nothing was merged.`
+        `The waivers could not be posted on the PR (${posted.detail}), and a waiver counts only when the PR records it. Nothing was merged.`
       );
   }
 
@@ -505,7 +535,7 @@ async function decide(options: Options, runtime: Runtime): Promise<Decision> {
     return {
       exit: EXIT.merged,
       text: renderEvaluations(
-        `MERGED: ${at} into ${after.baseRefName}${commit}`,
+        `MERGED: ${at} into ${after.baseRefName}${commit}${onWaiver("Merged")}`,
         evaluations
       ),
       run: {
@@ -567,30 +597,38 @@ function acceptanceRecord({ review, acceptance }: Facts): AcceptanceRecord | und
   };
 }
 
+/** `review` is null only on the operator's waiver, and then the gate refuses any skip, deferral or shortcut as stray. */
 function acceptanceComment(
-  review: Extract<Facts["review"], { kind: "found" }>,
+  review: Extract<Facts["review"], { kind: "found" }> | null,
   head: string,
-  { skips, deferrals, shortcuts, checks }: Acceptances
+  { skips, deferrals, shortcuts, checks, operatorWaiver }: Acceptances
 ): string {
   const sections: string[][] = [];
   const section = (title: string, lines: readonly string[]): void => {
     if (lines.length > 0) sections.push([title, "", ...lines]);
   };
-  section(
-    `merge-gate: the lead waived these skipped boxes of the review ${review.url} to merge ${head}.`,
-    skips.map(({ id, reason }) => `- ${id}: ${reason}`)
-  );
-  section(
-    `merge-gate: the lead deferred these skipped boxes of the review ${review.url} to their owners to merge ${head}.`,
-    deferrals.map(({ id, owner }) => {
-      const note = review.boxes.find((box) => box.id === id)?.note ?? "";
-      return `- ${id}: ${owner}${note === "" ? "" : `. Owed: ${note}`}`;
-    })
-  );
-  section(
-    `merge-gate: the lead accepted these shortcuts the review ${review.url} lists to merge ${head}.`,
-    shortcuts.map(({ id, reason }) => `- ${id}: ${reason}`)
-  );
+  if (operatorWaiver !== null)
+    section(
+      `merge-gate: the operator waived the independent review and the lead's acceptance to merge ${head}, in these words:`,
+      operatorWaiver.split(/\r?\n/).map((line) => `> ${line}`)
+    );
+  if (review !== null) {
+    section(
+      `merge-gate: the lead waived these skipped boxes of the review ${review.url} to merge ${head}.`,
+      skips.map(({ id, reason }) => `- ${id}: ${reason}`)
+    );
+    section(
+      `merge-gate: the lead deferred these skipped boxes of the review ${review.url} to their owners to merge ${head}.`,
+      deferrals.map(({ id, owner }) => {
+        const note = review.boxes.find((box) => box.id === id)?.note ?? "";
+        return `- ${id}: ${owner}${note === "" ? "" : `. Owed: ${note}`}`;
+      })
+    );
+    section(
+      `merge-gate: the lead accepted these shortcuts the review ${review.url} lists to merge ${head}.`,
+      shortcuts.map(({ id, reason }) => `- ${id}: ${reason}`)
+    );
+  }
   section(
     `merge-gate: the lead waived these missing gate checks to merge ${head}.`,
     checks.map(({ check, reason }) => `- ${check}: ${reason}`)

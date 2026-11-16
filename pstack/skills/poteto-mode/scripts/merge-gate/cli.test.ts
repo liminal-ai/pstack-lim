@@ -1746,6 +1746,101 @@ describe("merge-gate", () => {
     });
   });
 
+  describe("operator waiver", () => {
+    const words = "Lee: merge this without the usual review, it is docs only";
+    const waiver = ["--operator-waiver", words];
+    /** Codex's review only: no pstack-review or pstack-accept line. */
+    const unreviewed = (options: Partial<FakeOptions> = {}) => ({
+      comments: [codexComment(repos.head)],
+      accept: false as const,
+      ...options,
+    });
+
+    it("merges a PR with no review or acceptance, says so, posts the words, and logs them apart from the lead's waivers", async () => {
+      const result = await gate(unreviewed(), waiver);
+      expect(result.exit).toBe(0);
+      expect(result.out).toStartWith(
+        `MERGED: owner/repo#1 at ${repos.head.slice(0, 7)} into main as `
+      );
+      expect(result.out).toContain(
+        `\nMerged on the operator's waiver, with no independent review or lead's acceptance required. The operator's words: "${words}"\n`
+      );
+      expect(result.out).toContain(`met: Independent review (waived by the operator: "${words}")`);
+      expect(result.out).toContain(`met: Lead's acceptance (waived by the operator: "${words}")`);
+      const posted = result.calls.findIndex((call) => call.startsWith("comment "));
+      expect(result.calls[posted]).toBe(
+        `comment owner/repo#1 merge-gate: the operator waived the independent review and the lead's acceptance to merge ${repos.head}, in these words:\n\n> ${words}`
+      );
+      expect(posted).toBeLessThan(result.calls.findIndex((call) => call.startsWith("merge ")));
+      expect(result.log().split("\n")[1]).toContain(
+        `\tmerge\tmerged\t\t[{"kind":"operator-waiver","id":"review","reason":"${words}"}]\t`
+      );
+    });
+
+    it("would merge under --check, says so, and posts nothing", async () => {
+      const result = await gate(unreviewed(), ["--check", ...waiver]);
+      expect(result.exit).toBe(0);
+      expect(result.out).toContain("\nWould merge on the operator's waiver, with no independent review");
+      expect(result.calls.some((call) => call.startsWith("comment "))).toBe(false);
+    });
+
+    it("exits 2 on empty words or a second waiver, and merges nothing", async () => {
+      for (const [flags, text] of [
+        [["--operator-waiver", ""], "needs the operator's own words"],
+        [["--operator-waiver", "   "], "needs the operator's own words"],
+        [["--operator-waiver", "skip review", "--operator-waiver", "again"], "is given more than once"],
+      ] as const) {
+        const result = await gate(unreviewed(), flags);
+        expect(result.exit).toBe(2);
+        expect(result.full).toContain(text);
+        expect(merged(result.calls)).toBe(false);
+      }
+    });
+
+    it("still refuses on every other requirement: checks, a moved head, the plan's boxes", async () => {
+      const failed = await gate(unreviewed({ checks: [failing("e2e")] }), waiver);
+      expect(failed.exit).toBe(1);
+      expect(failed.missing).toEqual([
+        "missing: Checks. 1 failed (e2e). Fix the failures and push.",
+      ]);
+
+      const moved = await gate(
+        unreviewed({ atMerge: { pull: { headRefOid: repos.changedHead } } }),
+        waiver
+      );
+      expect(moved.exit).toBe(1);
+      expect(moved.out).toContain("the head moved");
+      expect(merged(moved.calls)).toBe(false);
+
+      const plan = join(import.meta.dir, "fixtures", "gc2-plan.md");
+      const planned = await gate(unreviewed(), [...waiver, "--plan", plan, "--plan-pr", "GC2"]);
+      expect(planned.exit).toBe(1);
+      expect(planned.missing).toHaveLength(1);
+      expect(planned.missing[0]).toStartWith(
+        "missing: Plan boxes. The operator waived the review, but GC2 in"
+      );
+      expect(merged(planned.calls)).toBe(false);
+    });
+
+    it("merges with the method given", async () => {
+      const result = await gate(unreviewed(), [...waiver, "--method", "merge"]);
+      expect(result.exit).toBe(0);
+      expect(result.calls).toContain(`merge owner/repo#1 ${repos.head} merge`);
+    });
+
+    it("exits 2 on a skip or shortcut accepted with no review to list it", async () => {
+      for (const flags of [
+        ["--accept-skip", "perf=not needed"],
+        ["--accept-shortcut", "live-1=carried"],
+      ]) {
+        const result = await gate(unreviewed(), [...waiver, ...flags]);
+        expect(result.exit).toBe(2);
+        expect(result.out).toContain("the operator waived the review and the gate reads none");
+        expect(merged(result.calls)).toBe(false);
+      }
+    });
+  });
+
   describe("merge brief", () => {
     it("prints the repo's merge brief first, on a check or a refusal", async () => {
       for (const options of [{}, { checks: [failing("build")] }]) {

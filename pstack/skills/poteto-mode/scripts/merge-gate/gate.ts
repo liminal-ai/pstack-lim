@@ -110,6 +110,8 @@ export interface Acceptances {
   readonly deferrals: readonly Deferral[];
   readonly shortcuts: readonly Accepted[];
   readonly checks: readonly CheckWaiver[];
+  /** The operator's own words waiving the review and the lead's acceptance, given as `--operator-waiver <words>`; the gate cannot check who wrote them. */
+  readonly operatorWaiver: string | null;
 }
 
 /** A plan file and the PR id that ends its section's title, as --plan and --plan-pr or a PR body's pstack-plan line give them. */
@@ -259,6 +261,8 @@ export interface Requirement {
   readonly name: string;
   /** The id a lead names in `--waive <id>=<reason>`; absent for a check no lead may waive. */
   readonly waiver?: string;
+  /** Met on the operator's waiver, `--operator-waiver <words>`. */
+  readonly operatorWaives?: true;
   readonly evaluate: (facts: Facts) => Result;
 }
 
@@ -497,9 +501,17 @@ export function declaredUpstream(
 
 export function strayAcceptances(facts: Facts): string[] {
   const { review, accepted } = facts;
+  // Unreachable without the operator's waiver, because the gate refuses a PR with no review.
+  const noReview = (flag: string, ids: readonly string[]): string[] =>
+    accepted.operatorWaiver === null
+      ? []
+      : ids.map(
+          (id) =>
+            `${flag} ${id}: the operator waived the review and the gate reads none, so there is nothing to accept`
+        );
   const notSkipped = (flag: string, ids: readonly string[]): string[] =>
     review.kind !== "found"
-      ? []
+      ? noReview(flag, ids)
       : ids
           .filter(
             (id) =>
@@ -513,7 +525,7 @@ export function strayAcceptances(facts: Facts): string[] {
           );
   const shortcuts =
     review.kind !== "found"
-      ? []
+      ? noReview("--accept-shortcut", accepted.shortcuts.map(({ id }) => id))
       : accepted.shortcuts
           .filter(({ id }) => !review.shortcuts.some((s) => s.id === id))
           .map(
@@ -656,6 +668,7 @@ const reviewDecision: Requirement = {
 
 const review: Requirement = {
   name: "Independent review",
+  operatorWaives: true,
   evaluate({ review: fact, currentHash, mergeBase, pull }) {
     const postLine = `pstack-review: head=${pull.headRefOid} base=${mergeBase} by=<model>`;
     if (fact.kind === "none" && fact.oldVerdict !== null)
@@ -745,8 +758,14 @@ const planBoxes: Requirement = {
       planFact.kind === "none"
         ? ["No plan checked: the PR declares none and none was passed."]
         : [];
-    if (fact.kind !== "found")
-      return met("no review to read; see Independent review", noPlan);
+    if (fact.kind !== "found") {
+      if (accepted.operatorWaiver === null || plan === null || plan.ids.length === 0)
+        return met("no review to read; see Independent review", noPlan);
+      return unmet(
+        `The operator waived the review, but ${plan.pr} in ${plan.path} has ${plan.ids.length} required box${plan.ids.length === 1 ? "" : "es"}, and only a review lists them. The waiver covers the review and the lead's acceptance, not the plan. Have a verifier list each box as ${BOX_FORMS}.`,
+        [`required: ${plan.ids.join(" ")}`]
+      );
+    }
     const listed = new Set(fact.boxes.map((box) => box.id));
     const repeated = [...listed].filter(
       (id) => fact.boxes.filter((box) => box.id === id).length > 1
@@ -925,6 +944,7 @@ const dispositionLine = ({ n, disposition }: IssueDisposition): string =>
 
 const acceptance: Requirement = {
   name: "Lead's acceptance",
+  operatorWaives: true,
   evaluate({ review: reviewed, acceptance: fact, pull }) {
     if (reviewed.kind !== "found")
       return unmet(
@@ -1118,21 +1138,28 @@ export const WAIVABLE_CHECKS: readonly string[] = REQUIREMENTS.flatMap(
   (requirement) => (requirement.waiver === undefined ? [] : [requirement.waiver])
 );
 
-/** Each requirement's result, a missing check the lead waived counting as met with its reason. */
+/**
+ * Each requirement's result. A missing check the lead waived counts as met with its reason, and so do
+ * the review and the lead's acceptance when the operator waived them, with the operator's words.
+ */
 export const evaluate = (facts: Facts): readonly Evaluation[] =>
-  REQUIREMENTS.map(({ name, waiver, evaluate: judge }) => {
+  REQUIREMENTS.map(({ name, waiver, operatorWaives, evaluate: judge }) => {
     const result = judge(facts);
     const waived = facts.accepted.checks.find((entry) => entry.check === waiver);
+    const { operatorWaiver } = facts.accepted;
     return {
       name,
       waiver,
-      result:
-        result.met || waived === undefined
-          ? result
-          : met(
+      result: result.met
+        ? result
+        : waived !== undefined
+          ? met(
               `waived by the lead: ${waived.reason}; unmet: ${result.missing}`,
               result.details
-            ),
+            )
+          : operatorWaives && operatorWaiver !== null
+            ? met(`waived by the operator: "${operatorWaiver}"`)
+            : result,
     };
   });
 
