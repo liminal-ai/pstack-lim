@@ -637,7 +637,7 @@ const reviewThreads: Requirement = {
   evaluate({ threads }) {
     if (threads.length === 0) return met("none open");
     return unmet(
-      `${threads.length} unresolved. Address each one and resolve it.`,
+      `${threads.length} unresolved. Address each thread, citing an existing or new fix or explaining why you defer or decline it, then resolve it.`,
       threads.map((thread) => {
         const where =
           thread.path === null
@@ -1002,7 +1002,7 @@ const acceptance: Requirement = {
     }
     if (fact.checked === null)
       parts.push(
-        'It has no "checked: <what you ran or read yourself>" line'
+        "It has no readable 'checked: <what you ran or read yourself>' line below the 'pstack-accept:' line"
       );
     if (repeated.length > 0) {
       parts.push(
