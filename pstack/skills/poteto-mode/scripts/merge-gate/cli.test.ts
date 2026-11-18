@@ -271,7 +271,9 @@ describe("merge-gate", () => {
         ],
       });
       expect(result.exit).toBe(1);
-      expect(result.out).toContain("missing: Review threads. 1 unresolved.");
+      expect(result.out).toContain(
+        "missing: Review threads. 1 unresolved. Address each thread, citing an existing or new fix or explaining why you defer or decline it, then resolve it."
+      );
       expect(result.out).toContain(
         "  chatgpt-codex-connector at src/a.ts:12: P1 Handle the empty case https://github.com/owner/repo/pull/1#discussion_r9"
       );
@@ -521,7 +523,9 @@ describe("merge-gate", () => {
     it("refuses an acceptance with no checked line", async () => {
       const result = await accepting(reviewComment(repos.head, repos.main), []);
       expect(result.exit).toBe(1);
-      expect(acceptLine(result.out)).toContain('It has no "checked: <what you ran or read yourself>" line');
+      expect(acceptLine(result.out)).toContain(
+        "It has no readable 'checked: <what you ran or read yourself>' line below the 'pstack-accept:' line."
+      );
     });
 
     it("refuses a high or medium issue with no line, and needs none for a low one", async () => {
