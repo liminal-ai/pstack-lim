@@ -12,7 +12,7 @@ The two most common design mistakes are taking the agent's first design and poli
 /architect design the import pipeline before writing any code. i care most about how callers use it.
 ```
 
-[`/architect`](../../skills/architect/SKILL.md) traces every system the change touches with `/how` first. Then it sketches two different shapes (types, signatures, module boundaries), screens both against its [design red flags](../../skills/architect/references/design-red-flags.md), and picks the one where each piece of state has one owner, each task has one way to do it, and callers need to know least. It works alone and spawns nothing.
+[`/architect`](../../skills/architect/SKILL.md) traces every system the change touches with `/how` first. Then it sketches two different shapes (types, signatures, module boundaries), screens both against its [design red flags](../../skills/architect/references/design-red-flags.md), and picks the one where each piece of state has one owner, each task has one way to do it, and callers need to know least. The sketch itself works alone and spawns nothing.
 
 The design isn't sacred once code starts. If workarounds keep repeating, `/architect` redesigns instead of patching around them.
 
