@@ -3,7 +3,7 @@
 **You own the design. Plan, review, verify.** Delegate implementation. Stay in the lead.
 
 1. `how` over the affected subsystem.
-2. `architect` for parallel design exploration. Ask the operator when the design decides what the data is or who can do what.
+2. `architect` for sketching two shapes and picking the cleanest ownership. Ask the operator when the design decides what the data is or who can do what.
 3. Write the throughput checkpoint as four todo items. A dimension that genuinely does not apply (single file, no fan-out) keeps its item with `n/a: <reason>` rather than being dropped:
    - **Blocking first steps.** Gates run before fan-out.
    - **Independent workstreams.** Disjoint files, services, or layers parallelize. Shared writes serialize.
@@ -13,7 +13,7 @@
 5. Verify on the matching surface through the project's verify skill. "Inconclusive" or wrong-surface is not a pass. Flag it. When the change adds or changes behavior a user can reach, update the verify skill in the same PR so it covers the change.
 6. Rebase into small, ordered commits. Stack follow-ups.
    Use the **sequence-verifiable-units** principle skill, building, verifying, and committing each small unit before the next.
-7. If the design is contested, `interrogate` before shipping.
+7. If a diff, claim, or implementation is contested, `interrogate` before shipping. For a contested design, converge per `references/converge-a-design.md` or run **arena** in step 2.
 8. Run **Opening a PR**.
 
 Parent-level fan-out is for slices that produce independent artifacts (audits, cross-subsystem investigations, competing experiments). Rewrite the checkpoint at phase boundaries.

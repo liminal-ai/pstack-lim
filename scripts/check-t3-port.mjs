@@ -100,6 +100,7 @@ const REQUIRED = [
   ["pstack/skills/poteto-mode/SKILL.md", "todos/<YYYY-MM-DD>-<task-slug>.md", "The todo list is a file in the pstack store."],
   ["pstack/skills/poteto-mode/SKILL.md", "Claude fast mode", "State the Claude fast-mode consent rule."],
   ["pstack/skills/poteto-mode/SKILL.md", "Never raise it above the role line", "Effort is lower-only from the role line."],
+  ["pstack/skills/poteto-mode/worker.md", "Never pass, fail, or block; the lead decides.", "A verifier reports and the lead decides."],
   ["pstack/skills/setup-pstack/SKILL.md", "~/lim-v2/AGENTS.md", "setup-pstack writes the role file."],
   ["pstack/skills/setup-pstack/SKILL.md", "Claude fast mode", "setup-pstack never writes Claude fast mode."],
   ["pstack/skills/poteto-mode/playbooks/babysit.md", "watch_pull_request", "Babysit wakes on T3's PR watch."],

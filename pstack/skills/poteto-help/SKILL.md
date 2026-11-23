@@ -50,7 +50,7 @@ This pstack is ported from Cursor to T3 Code. Its workflow skills, including `/p
 
 Start each task thread with `/poteto-mode`. It attaches the skill to that message, and it fades as the chat moves on.
 
-Mid-chat, "new task" makes the mode match a fresh playbook. `/poteto-mode` already uses `poteto-agent` for the subagents its playbook steps spawn. To get the same style from a subagent of your own, start its brief by telling it to read `~/.agents/skills/poteto-mode/SKILL.md` in full, as `~/.agents/agents/poteto-agent.md` says.
+Mid-chat, "new task" makes the mode match a fresh playbook. `/poteto-mode` already uses `poteto-agent` for the subagents its playbook steps spawn. To get the same style from a subagent of your own, make the first line of its brief `Read ~/.agents/skills/poteto-mode/worker.md before anything else.`, as `~/.agents/agents/poteto-agent.md` says. `worker.md` holds the rules every delegate keeps.
 
 ## Pick a skill
 
@@ -67,7 +67,7 @@ The default answer is `/poteto-mode`, which runs most of the others when its ste
 | Catch up on their own recent work on a topic | [`/recall`](../recall/SKILL.md) |
 | Catch up on what changed in this chat since their last message, in plain words and small visuals, with every item waiting on them listed and decidable from the reply alone | [`/ketchup`](../ketchup/SKILL.md) |
 | Know what a small diff could break outside itself | [`/blast-radius`](../blast-radius/SKILL.md) |
-| Settle types and module shape before code that crosses a function boundary | [`/architect`](../architect/SKILL.md) |
+| Sketch two shapes for code that crosses a function boundary and pick the cleaner one | [`/architect`](../architect/SKILL.md) |
 | Get several attempts at one brief, merged into the best one | [`/arena`](../arena/SKILL.md) |
 | Run parallel checks over slices, or race workers, as cloud agents | [`/swarm`](../swarm/SKILL.md) |
 | Have different models review a diff and try to break it | [`/interrogate`](../interrogate/SKILL.md) |
@@ -99,14 +99,14 @@ Close calls:
 
 - `/how` explains what the code does. `/why` explains the reasons. `/teach` runs one or both and explains the result plainly.
 - `/arena` gives every worker the same brief and merges the best parts. `/swarm` splits work into slices or a race and returns one report.
-- `/architect` implements right after it settles the design. Add "with checkpoint" to review the design before it writes code.
+- `/architect` sketches two shapes alone and picks one. `/arena` runs blind competing attempts for an open design that's hard to reverse. A big concrete design or plan converges with reviewers per poteto-mode's [converge a design](../poteto-mode/references/converge-a-design.md).
 - `/interrogate` reviews the diff. `/blast-radius` looks for breakage outside the diff and proves the one fact that makes the change safe.
 - `/recall` rebuilds context across recent chats. `/ketchup` covers only this chat since the user's last message. Resuming one specific chat or branch is the Session pickup playbook.
 - `/figure-it-out` designs one rigorous run. The Orchestrate playbook runs a program that spans days and many PRs. The Autonomous run playbook drives one task to a finish condition.
 
 Not in pstack:
 
-- `/loop` is a Claude Code built-in, and its timer dies when the session restarts, so every pstack lead wakes through T3's `schedule_task` instead. `/create-skill` is Cursor's built-in, not part of pstack.
+- `/loop` is a Claude Code built-in, and its timer dies when the session restarts, so every pstack lead wakes through T3's `schedule_task` instead. `/create-skill` is installed alongside pstack, not part of pstack.
 - pstack has no `/orchestrate` skill. Orchestrate is a `/poteto-mode` playbook. If the slash menu shows `/orchestrate`, another plugin provides it.
 
 ## Playbooks and principles
