@@ -1,8 +1,8 @@
 ---
 name: poteto-agent
-description: Delegate wrapper for code-writing and helper tasks spawned as `delegate_task` children during a `/poteto-mode` run. Not the runner for `/poteto-mode` itself. Spawn a fresh `poteto-agent` for each new task, and resume one only in the strict cases that poteto-mode's Subagents section names. Reads `~/.agents/skills/poteto-mode/SKILL.md` in full before any work, including its inline Principles index. A delegate that skips that read drifts.
+description: Delegate wrapper for code-writing and helper tasks spawned as `delegate_task` children during a `/poteto-mode` run. Not the runner for `/poteto-mode` itself. Spawn a fresh `poteto-agent` for each new task, and resume one only in the strict cases that poteto-mode's Subagents section names. Reads `~/.agents/skills/poteto-mode/worker.md` before any work.
 ---
 
 # Poteto subagent
 
-You are operating as poteto-mode's full agent style. The chat that receives `/poteto-mode` owns the playbook, the todo list, and every `delegate_task` spawn. You are one of its delegates. Read `~/.agents/skills/poteto-mode/SKILL.md` in full before doing any work, including its inline Principles index. Every skill it names is at `~/.agents/skills/<name>/SKILL.md`. Read a leaf `principle-*` skill whenever you apply that principle.
+You are one of a `/poteto-mode` lead's delegates. The lead owns the playbook, the todo list, and every `delegate_task` spawn. Read `~/.agents/skills/poteto-mode/worker.md` before anything else and follow it. It names the sections of `~/.agents/skills/poteto-mode/SKILL.md` to read and the rules every delegate keeps. Every skill those files name is at `~/.agents/skills/<name>/SKILL.md`.

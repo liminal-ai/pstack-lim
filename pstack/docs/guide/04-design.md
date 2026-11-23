@@ -1,6 +1,6 @@
 # Design before you write code
 
-One attempt at a hard design locks in the first shape the model thought of. `/architect` settles types and boundaries before implementation. `/arena` runs several attempts at the same brief and merges the best parts. `/interrogate` has other models try to break the result. When the job is coverage rather than design synthesis, `/swarm` fans out slices or races and aggregates their results.
+One attempt at a hard design locks in the first shape the model thought of. `/architect` sketches two shapes for types and boundaries and picks the cleaner one before implementation. `/arena` runs several blind attempts at the same brief and merges the best parts. A big design or plan converges with reviewers before it reaches you. `/interrogate` has other models try to break a finished change. When the job is coverage rather than design synthesis, `/swarm` fans out slices or races and aggregates their results.
 
 The two most common design mistakes are taking the agent's first design and polishing a plan that no code has tested. This page fixes both. You plan through code. Prototypes answer the open questions, a README or tutorial sets the target, and the written plan comes last.
 
@@ -12,15 +12,11 @@ The two most common design mistakes are taking the agent's first design and poli
 /architect design the import pipeline before writing any code. i care most about how callers use it.
 ```
 
-[`/architect`](../../skills/architect/SKILL.md) grounds itself first, running `/how` over the code the design touches and `/why` when it moves ownership or layers. Then it runs `/arena` to produce competing design sketches, with the caller's usage written first in each, followed by types, signatures, and a module map.
+[`/architect`](../../skills/architect/SKILL.md) traces every system the change touches with `/how` first. Then it sketches two different shapes (types, signatures, module boundaries), screens both against its [design red flags](../../skills/architect/references/design-red-flags.md), and picks the one where each piece of state has one owner, each task has one way to do it, and callers need to know least. It works alone and spawns nothing.
 
-By default it proceeds straight from the synthesized design into implementation. If you want to see the design first, say so:
+The design isn't sacred once code starts. If workarounds keep repeating, `/architect` redesigns instead of patching around them.
 
-```text
-/architect with checkpoint. stop and show me before implementing.
-```
-
-The design isn't sacred once code starts. If implementation shows the same workaround in unrelated places, or types that only compile with `any` or forced casts, `/architect` treats that as proof the design is wrong. It scraps the sketch and starts over instead of patching around it.
+When the architecture is genuinely open and hard to reverse, `/architect` hands off to `/arena`, so blind competing shapes keep the first idea from anchoring the rest. When a concrete design or plan is big enough to settle before it reaches you, it converges with reviewers per [converge a design](../../skills/poteto-mode/references/converge-a-design.md). Reviewers from the `design reviewers` role give feedback, the lead verifies and rules on each point, and they go back and forth until they agree.
 
 ## Fan out attempts with `/arena`
 
@@ -121,11 +117,12 @@ For a migration, state the bar in the prompt:
 You might be wondering whether every change needs this. No. Most changes need none of it. A rough ladder:
 
 - A small, finished change you're unsure about needs `/interrogate` alone.
-- A change that crosses function boundaries or moves ownership earns `/architect`, which brings `/arena` with it.
+- A change that crosses function boundaries or moves ownership earns `/architect`, a two-shape sketch.
 - A standalone decision where independent attempts would help, like naming, formats, or an algorithm, is `/arena` directly.
 - A coverage matrix, set of parallel checks, or race with declared arms is `/swarm`.
 - An open question you could answer by running something, like a layout, a timing, or an approach, gets a prototype, not a debate.
-- A contested design that's expensive to reverse gets `/architect`, then `/interrogate` before shipping.
+- An open design that's expensive to reverse gets `/arena`. A concrete design or plan big enough to settle first converges with reviewers.
+- A contested diff, claim, or implementation gets `/interrogate` before shipping.
 - Work that spans several PRs gets a plan, written after the design settles.
 
 `/poteto-mode` already applies this ladder. Boundary-crossing work triggers `/architect` on its own, so you reach for these directly mainly when you want more or less scrutiny than the default.

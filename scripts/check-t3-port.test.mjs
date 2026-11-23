@@ -60,6 +60,7 @@ const regressions = [
   ["effort-raise", "pstack/skills/swarm/SKILL.md", (s) => s + "\nA lane may go up to max.\n"],
   ["effort-raise", "pstack/skills/arena/SKILL.md", (s) => s + "\nUse the fast slug when the job is urgent.\n"],
   ["missing-anchor", "pstack/skills/poteto-mode/SKILL.md", (s) => s.replace("Never raise it above the role line", "Raise it when the job needs it")],
+  ["missing-anchor", "pstack/skills/poteto-mode/worker.md", (s) => s.replace("Never pass, fail, or block; the lead decides.", "Post PASS or FAIL.")],
   ["trunk-main", "pstack/skills/poteto-mode/scripts/watch-pr/watch-pr", (s) => s + "\n# git fetch origin/main\n"],
 ];
 
