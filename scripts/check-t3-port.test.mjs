@@ -37,7 +37,7 @@ const regressions = [
   ["tmp-default", "pstack/automations/benny/templates/configuration.example.yaml", (s) => s.replace('".pstack/runs/benny/proof"', '"/tmp/benny-artifacts"')],
   ["tmp-default", "pstack/skills/arena/SKILL.md", (s) => s.replace("`<run folder>/scratch/arena-<slug>/candidate-<n>/`", "`/tmp/arena-<slug>/candidate-<n>/`")],
   ["missing-anchor", "pstack/skills/poteto-mode/SKILL.md", (s) => s.replaceAll("delegate_task", "Task")],
-  ["claude-fast-default", "pstack/skills/setup-pstack/SKILL.md", (s) => s.replace("judgment and prose: claudeAgent/claude-opus-5-5 effort=xhigh", "judgment and prose: claudeAgent/claude-opus-5-5 effort=xhigh fastMode=true")],
+  ["claude-fast-default", "pstack/skills/setup-pstack/SKILL.md", (s) => s.replace(/judgment and prose: claudeAgent\/claude-opus-5-5 effort=\w+/, "$& fastMode=true")],
   ["hidden-skill", "pstack/skills/how/SKILL.md", (s) => s.replace("---\n", "---\ndisable-model-invocation: true\n")],
   ["cursor-subagent", "pstack/skills/swarm/SKILL.md", (s) => s + "\nSpawn each worker with `subagent_type: generalPurpose`.\n"],
   ["cursor-rule-file", "pstack/skills/setup-pstack/SKILL.md", (s) => s + "\nWrite `~/.cursor/rules/pstack-models.mdc`.\n"],

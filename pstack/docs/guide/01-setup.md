@@ -20,11 +20,11 @@ Run:
 /setup-pstack
 ```
 
-[`/setup-pstack`](../../skills/setup-pstack/SKILL.md) detects the models you have access to, asks for a reasoning budget, shows you each role (code delegates, judgment, the review panels), and asks what you want. Answer the questions. It writes `~/.cursor/rules/pstack-models.mdc`, a small rule every pstack skill reads.
+[`/setup-pstack`](../../skills/setup-pstack/SKILL.md) detects the models you have access to, asks for a reasoning budget, shows you each role (code delegates, judgment, the review panels), and asks what you want. Answer the questions. After Lee approves the exact text, it writes the role block into `~/lim-v2/AGENTS.md`, which every pstack skill reads.
 
-The defaults run at `xhigh` reasoning, the same as the `large` budget. `unlimited` lifts each model to its highest tier, up to `max`. Opus goes to `max`. Grok tops out at `xhigh`, so it stays there. `medium` and `small` lower the reasoning and spend fewer tokens.
+The defaults `/setup-pstack` writes are the same as the `medium` budget. Code, prose, and judgment run on Opus 5.5 at `high` reasoning, and the hardest tasks and the design reviewers run at `xhigh`. No role runs above `xhigh`. `large` raises each pstack role one level, to at most `xhigh`, and spends more tokens. `small` lowers each one a level and spends fewer. The budget leaves general work-kind lines, such as skill and prompt review, as they are.
 
-You only override what you care about. A role with no line in the rule keeps the skill's default. To restore a default, delete that role's line. A rerun of `/setup-pstack` keeps any role whose model differs from the default. When a default changes, a rule written before the change still pins the old default, so delete those role lines, or delete the file, then run `/setup-pstack` again.
+You only override what you care about. A role with no line in the block falls back to the skill's built-in default, GPT 6.2 Sol at `high` for code and Opus 5.5 at `high` for prose and judgment. To fall back to it, delete that role's line. A rerun of `/setup-pstack` keeps any role whose model differs from the default. When a default changes, a block written before the change still pins the old default, so remove those role lines from the block, then run `/setup-pstack` again.
 
 You might be wondering what happens if you use Auto. Set a role to `inherit-parent` or `auto` and pstack omits the subagent `model` field, so the subagent inherits your parent chat model. Both values mean the same thing, and neither is a model slug. For a panel role the value is a list, and one subagent runs per entry, so the list length sets the panel size. Setup also configures `swarm workers`, the default model for every `/swarm` worker unless a race names a model for each arm.
 

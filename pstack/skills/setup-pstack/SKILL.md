@@ -15,53 +15,63 @@ Call `orchestrator_capabilities`. Every model of a provider instance that can ru
 
 ### 2. Load current state
 
-The default role-to-model mapping is the block shape shown in step 5 below. If the role file already has the block, read it and treat its `# budget` line and its role values as the current choices. Otherwise start from those defaults. A line whose role is not in step 5, such as `how critics`, is from a retired role. Drop it. One value is not a model role, so keep it as it is: a `counterparts` value (it points at the role file's Counterparts list).
+The default role-to-model mapping is the block shape shown in step 5 below. If the role file already has the block, read it and treat its `# budget` line and its role values as the current choices. Otherwise start from those defaults. A general work-kind line names a kind of work, not a pstack role: `simple code research`, `simple web research`, `x / tech / ai-twitter research`, `deep analysis`, `design / aesthetics`, `writing / drafting`, `computer use, easy`, `computer use, complex`, `computer use, high-volume easy`, `skill / prompt writing`, `skill / prompt review`, or another one Lee added. Keep every general work-kind line as it is. A pstack role line whose role is not in step 5, such as `how critics` or `architect runners`, is from a retired role. Drop it. Never drop a general work-kind line. One value is not a model role, so keep it as it is: a `counterparts` value (it points at the role file's Counterparts table).
 
 ### 3. Budget, map, and confirm
 
-**(a) Ask for a budget.** Prefer the harness's ask-the-user tool over free text, or ask in chat when it has none. Offer these four options with these exact labels, and name the current budget when the rule records one. With no rule, say that `large` matches the skill defaults.
+**(a) Ask for a budget.** Prefer the harness's ask-the-user tool over free text, or ask in chat when it has none. Offer these three options with these exact labels, and name the current budget when the rule records one. With no rule, say that `medium` matches the step 5 block. No role runs above `xhigh`. Under `medium`, most pstack roles run at `high`, and `hardest tasks` and `design reviewers` run at `xhigh`.
 
-- `unlimited — max reasoning`
 - `large — xhigh reasoning`
 - `medium — high reasoning`
 - `small — medium reasoning`
 
-**(b) Apply it.** Build the working table from the skill defaults, and on a re-run keep any role you changed by family, list, or alias (`inherit-parent`, `auto`). `unlimited`, `large`, `medium`, and `small` set the effort option of every real entry, panel entries included, to `max`, `xhigh`, `high`, or `medium`. The effort option is the one the model takes for reasoning (`effort`, `reasoningEffort`, or `reasoning_effort`), on the ladder `max` > `xhigh` > `high` > `medium` > `low`. Other options, such as `fastMode=true`, stay. If the model does not offer the target value, use its highest value at or below the target, else the same family's detected model that does, else mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `unlimited` turns `claudeAgent/claude-opus-5-5 effort=xhigh` into `effort=max`. A model whose effort tops out at `xhigh` stays at `xhigh` under `unlimited`. `large` keeps both defaults. `small` turns them into `effort=medium` and `reasoning_effort=medium`.
+**(b) Apply it.** Build the working table from the step 5 block, and on a re-run keep any role you changed by family, list, or alias (`inherit-parent`, `auto`). Families are the ones Phase A step 3 of the **arena** skill defines, so Fable is its own family. The budget moves pstack role lines only. General work-kind lines keep their values. Each real entry has its own target effort, which is that entry's step 5 effort moved by the budget on the ladder `xhigh` > `high` > `medium` > `low`. `medium` keeps it, `large` raises it one step, and `small` lowers it one step. No entry runs above `xhigh`, and a target at the bottom of the ladder stays there. Most defaults are at `high`, and each budget label names where those land. Set the effort option of every real entry, panel entries included, to that entry's target. The effort option is the one the model takes for reasoning (`effort`, `reasoningEffort`, `thinking_level`, or `reasoning_effort`). Other options, such as `fastMode=true` on a Grok entry, stay. If the model does not offer the target value, use its highest value at or below the target, else the same family's detected model that does, else mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `large` turns `claudeAgent/claude-opus-5-5 effort=high` into `effort=xhigh` and `codex/gpt-6.2-sol reasoningEffort=high` into `reasoningEffort=xhigh`, and `hardest tasks` stays at `effort=xhigh`. `small` turns them into `effort=medium` and `reasoningEffort=medium`, and `hardest tasks` into `effort=high`. A role whose entries start at different efforts keeps that spread. `swarm workers` keeps `codex/gpt-6.2-sol reasoningEffort=medium, claudeAgent/claude-sonnet-5-5 effort=high` under `medium`, shifts to `reasoningEffort=high` and `effort=xhigh` under `large`, and shifts to `reasoningEffort=low` and `effort=medium` under `small`. `antigravity/gemini-4-neon` takes `thinking_level` from `low` to `xhigh`, so when a pstack role uses it at `thinking_level=high`, `large` writes `thinking_level=xhigh`.
 
-**(c) Show the roles and confirm.** Show every role with its model, marking any real entry not in the detected set as needing a choice. Also list each line step 2 dropped. Ask whether to accept as-is or change specific roles, offering the detected models plus `inherit-parent` and `auto` (both mean: this role runs on the parent thread's model, with no `target`) as the options. Prefer the harness's ask-the-user tool over free text, or ask in chat when it has none. For panel roles (arena runners, architect runners, interrogate reviewers, design reviewers) the value is a list, and one subagent runs per entry, alias entries included, so the list length sets the count. `arena cross-judge pool` is also a list, but Arena runs one judge. It tries only values from a family other than the parent's, in list order, so order it by preference. An `inherit-parent` or `auto` value never judges. `swarm workers` is the default model for every worker unless a race or comparison assigns another model per arm.
+**(c) Show the roles and confirm.** Show every role with its model, marking any real entry not in the detected set as needing a choice. Also list each line step 2 dropped. Ask whether to accept as-is or change specific roles, offering the detected models at `xhigh` or below plus `inherit-parent` and `auto` (both mean: this role runs on the parent thread's model, with no `target`) as the options. Prefer the harness's ask-the-user tool over free text, or ask in chat when it has none. For panel roles (arena runners, interrogate reviewers, design reviewers) the value is a list, and one subagent runs per entry, alias entries included, so the list length sets the count. `arena cross-judge pool` is also a list, but Arena runs one judge. It tries only values from a vendor other than the parent's, in list order, so order it by preference. Fable and the other Claude models are one vendor. A `counterparts` value resolves through the role file's Counterparts table. An `inherit-parent` or `auto` value never judges. `swarm workers` is the default model for every worker unless a race or comparison assigns another model per arm.
 
 ### 4. Validate
 
-Every real entry written must be in the detected set: its provider instance, its model, and each option value. `inherit-parent` and `auto` always pass. If a chosen real entry is not available, stop and ask again.
+Every real entry written must be in the detected set, with its provider instance, its model, and each option value, and its effort at `xhigh` or below. `inherit-parent` and `auto` always pass. If a chosen real entry is not available, stop and ask again.
 
-Never write Claude fast mode (`fastMode=true` on any Claude entry), even when the user picks it here. Claude fast mode is approved per task, in a session, per the Speed rule in poteto-mode's Subagents section, so a role line is the wrong place for it. Say so and write the entry without it. Grok entries keep `fastMode=true`, and GPT entries may carry `serviceTier=priority`.
+Never write Claude fast mode (`fastMode=true` on any Claude entry), even when the user picks it here. Claude fast mode is approved per task, in a session, per the Speed rule in poteto-mode's Subagents section, so a role line is the wrong place for it. Say so and write the entry without it. Grok entries keep `fastMode=true`, as on the `x / tech / ai-twitter research` line, and GPT entries may carry `serviceTier=priority`.
 
 ### 5. Write the block
 
-Write the block into `~/lim-v2/AGENTS.md` only, with a `# budget` line with the chosen label and its target effort, and one line per role, using the same labels poteto-mode uses. Replace the whole fenced block so re-runs stay idempotent. Leave the rest of the file as it is, including the notes under the block, and update a note only where it names a value you changed. Shape:
+Show Lee the exact proposed text of every edit to `~/lim-v2/AGENTS.md`, and wait for Lee's approval of that exact text before you edit the file, per the role file's rule on agent instruction files. That covers the fenced role block and any note under the block that names a value you changed, such as the note that build or browser lanes use Sol medium. If Lee changes the text, show the new text and wait again. Write the approved block into `~/lim-v2/AGENTS.md` only, with a `# budget` line with the chosen label and its target effort, and one line per role, using the same labels poteto-mode uses. Replace the whole fenced block so re-runs stay idempotent. Write each approved note edit as approved. Never edit anything outside the approved text, so the rest of the file stays as it is, including the Counterparts table under the block. Shape:
 
 ```
 # pstack model configuration. One line per role. Delete a line to fall back to the skill default.
 # `inherit-parent` or `auto` as a value: the role runs on the parent thread's model (omit `target`). Alias entries in a panel list still count toward its fan-out.
-# budget: large (xhigh)
-feature, refactoring: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-bug-fix: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-perf-issue: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-hillclimb: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-judgment and prose: claudeAgent/claude-opus-5-5 effort=xhigh
+# budget: medium (high)
+simple code research: claudeAgent/claude-sonnet-5-5 effort=medium
+simple web research: codex/gpt-6.1-terra reasoningEffort=medium
+x / tech / ai-twitter research: cursor/grok-4.7 reasoning_effort=high fastMode=true
+deep analysis: claudeAgent/claude-fable-5-2 effort=high, codex/gpt-6.2-astra reasoningEffort=high
+design / aesthetics: claudeAgent/claude-opus-5-5 effort=high
+writing / drafting: muse/muse-wonder-full-1.0 reasoningEffort=medium|high
+computer use, easy: codex/gpt-6.2-sol reasoningEffort=medium
+computer use, complex: codex/gpt-6.2-sol reasoningEffort=high
+computer use, high-volume easy: codex/gpt-6.1-terra reasoningEffort=medium
+
+feature, refactoring: claudeAgent/claude-opus-5-5 effort=high
+bug-fix: claudeAgent/claude-opus-5-5 effort=high
+perf-issue: claudeAgent/claude-opus-5-5 effort=high
+hillclimb: claudeAgent/claude-opus-5-5 effort=high
 hardest tasks: claudeAgent/claude-opus-5-5 effort=xhigh
-how explorer: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-how explainer: claudeAgent/claude-opus-5-5 effort=xhigh
-why investigators: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-why synthesizer: claudeAgent/claude-opus-5-5 effort=xhigh
-reflect tooling: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-reflect judgment, divergent, synthesizer: claudeAgent/claude-opus-5-5 effort=xhigh
-arena runners: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-arena cross-judge pool: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-swarm workers: cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-architect runners: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-interrogate reviewers: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
-design reviewers: claudeAgent/claude-opus-5-5 effort=xhigh, cursor/grok-4.7 reasoning_effort=xhigh fastMode=true
+judgment and prose: claudeAgent/claude-opus-5-5 effort=high
+how explorer: claudeAgent/claude-sonnet-5-5 effort=high
+how explainer: claudeAgent/claude-opus-5-5 effort=high
+why investigators: codex/gpt-6.1-terra reasoningEffort=high
+why synthesizer: claudeAgent/claude-opus-5-5 effort=high
+reflect tooling: codex/gpt-6.1-terra reasoningEffort=high
+reflect judgment, divergent, synthesizer: claudeAgent/claude-opus-5-5 effort=high
+arena runners: claudeAgent/claude-opus-5-5 effort=high, codex/gpt-6.2-sol reasoningEffort=high
+interrogate reviewers: claudeAgent/claude-opus-5-5 effort=high, codex/gpt-6.2-sol reasoningEffort=high
+design reviewers: codex/gpt-6.2-astra reasoningEffort=xhigh, muse/muse-wonder-full-1.0 reasoningEffort=xhigh
+arena cross-judge pool: counterparts
+swarm workers: codex/gpt-6.2-sol reasoningEffort=medium, claudeAgent/claude-sonnet-5-5 effort=high
+skill / prompt writing: antigravity/gemini-4-neon thinking_level=high
+skill / prompt review: muse/muse-wonder-full-1.0 reasoningEffort=xhigh
 ```
 
 ### 6. Confirm

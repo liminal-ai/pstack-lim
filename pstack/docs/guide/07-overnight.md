@@ -93,7 +93,7 @@ The contract above drives one task to one finish condition. Some nights hold mor
 
 ## Run many projects in parallel
 
-A [Cursor Project](https://cursor.com/blog/projects) gives one coordinator agent a persistent thread. The coordinator doesn't write code. It directs subagents, which run in the cloud by default, so the work continues when your laptop is closed. That's the shape the Orchestrate playbook expects. Start your prompts to the coordinator with `/poteto-mode`, and the subagents it spawns follow the playbooks.
+A [Cursor Project](https://cursor.com/blog/projects) gives one coordinator agent a persistent thread. The coordinator doesn't write code. It directs subagents, which run in the cloud by default, so the work continues when your laptop is closed. That's the shape the Orchestrate playbook expects. Start your prompts to the coordinator with `/poteto-mode`, and the subagents it spawns follow the playbooks. Each agent it starts reads [`worker.md`](../../skills/poteto-mode/worker.md) first, so workers hold to the kickoff's bar, decide reversible calls instead of asking you, and return to the coordinator rather than opening a PR unless the kickoff asks for one.
 
 A few habits help:
 

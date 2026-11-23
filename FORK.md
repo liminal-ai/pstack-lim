@@ -2,14 +2,14 @@
 
 Read this file before you merge from upstream, push, open a PR, or merge one.
 
-Fork of `cursor/plugins`, default branch `lim`. Fork point: upstream `11713c6` (pstack 0.15.17). Last synced: upstream `4dd1d05` (pstack 0.15.36), recorded in `FORK-SYNC-LOG.md`. Install only from `pstack/`, never the repo root; for the `/orchestrate` name clash see `poteto-help`. Role-file setup lives in `setup-pstack`.
+Fork of `cursor/plugins`, default branch `lim`. Fork point: upstream `11713c6` (pstack 0.15.17). Last synced: upstream `7a583913` (pstack 0.15.46), recorded in `FORK-SYNC-LOG.md`. Install only from `pstack/`, never the repo root; for the `/orchestrate` name clash see `poteto-help`. Role-file setup lives in `setup-pstack`.
 
 ## Upstream drift
 
 ```bash
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/cursor/plugins.git
 git fetch --multiple upstream origin
-SYNC=4dd1d05   # last synced upstream commit; set it to the new tip after each sync
+SYNC=7a583913eb1b8d1a0ee76753d1a2cf072e7b54f9   # last synced upstream commit; set it to the new tip after each sync
 git log --oneline $SYNC..upstream/main -- pstack cursor-team-kit/skills     # upstream commits since the last sync
 git show upstream/main:pstack/.cursor-plugin/plugin.json | rg version        # upstream pstack version
 comm -12 <(git diff --name-only $SYNC upstream/main -- pstack | sort) \
@@ -33,9 +33,9 @@ pstack upstream is written for Cursor. This fork runs it from T3 Code, where one
 | Area | Upstream says | The fork says | Why |
 |---|---|---|---|
 | Subagents | Cursor `Task` with `subagent_type`, `readonly`, `environment` | a T3 `delegate_task` child, `mode: "async"`, with an explicit `target` (omitted only when the role line says `auto` or `inherit-parent`) | Only T3's tool reaches every provider from one lead. A child's task can publish its result when its turn ends, before any later wake, so its brief tells it never to end the turn to wait. |
-| Model per role | `~/.cursor/rules/pstack-models.mdc`, slugs such as `grok-4.7-xhigh-fast` | the pstack roles block in `~/lim-v2/AGENTS.md`, entries `<providerInstanceId>/<model> <option>=<value>` | Every harness under `~/lim-v2` reads that one file, and T3 takes provider, model and options as separate fields. |
-| Speed | a `-fast` slug, used when the job is urgent | Grok and GPT may run fast freely. Claude fast mode only on work the operator names in the session, and only that work. Retries, reviewers, verifiers and later tasks are covered only if the operator names them too. | Grok usage is plentiful. Claude fast mode spends rate limit fast, and a broad reading of one approval gets out of hand. |
-| Effort | each spawn raises or lowers the role's effort for the job, up to max | each spawn keeps the role line's effort for judgment, review and design, may lower it for routine work, and never raises it above the role line | A raise spends Claude rate limit per spawn, and the `hardest tasks` line already covers the hardest work, so the role file stays the single source of model choice. |
+| Model per role | `~/.cursor/rules/pstack-models.mdc`, slugs such as `claude-opus-5-5-xhigh-fast`, with a `# defaults: N` line that lets setup replace old defaults | the pstack roles block in `~/lim-v2/AGENTS.md`, entries `<providerInstanceId>/<model> <option>=<value>`. The block also holds Lee's general work-kind lines, which setup-pstack keeps. setup-pstack shows Lee the exact text of every edit to that file, the block and any note under it, and writes only after Lee approves that text, and it has no defaults migration | Every harness under `~/lim-v2` reads that one file, and T3 takes provider, model and options as separate fields. A change to that file needs Lee's approval of its exact text. |
+| Speed | a `-fast` slug, and Opus 5.5 always runs its `-fast` slug | Grok and GPT may run fast freely. Grok is kept for X, tech and AI-Twitter research, with `fastMode=true`, and GPT may run `serviceTier=priority`. Claude fast mode only on work the operator names in the session, and only that work. Retries, reviewers, verifiers and later tasks are covered only if the operator names them too. | Grok usage is plentiful. Claude fast mode spends rate limit fast, and a broad reading of one approval gets out of hand. |
+| Effort | each spawn raises or lowers the role's level for the job, with no role above `xhigh` | each spawn keeps the role line's effort for judgment, review and design, may lower it for routine work, and never raises it above the role line. No role line runs above `xhigh`, and setup-pstack has no `unlimited` budget | A raise spends Claude rate limit per spawn, and the `hardest tasks` line already covers the hardest work, so the role file stays the single source of model choice. |
 | Waking | Cursor background agents and polling scripts | T3 `watch_pull_request`, child-completion wakes, and a fallback heartbeat per "Waking and polling" in `~/lim-v2/AGENTS.md`. A child polls within its turn. | A T3 thread that ends its turn is woken only by an event: a PR watch, a child's completion, a `schedule_task` or `t3_thread_send`, or, on Claude and Codex, its own background command finishing. A heartbeat covers what the watch misses. A child can't watch a PR, and a later wake can come after its result. |
 | Todo list | the harness's todo tool | the harness's todo tool if it has one, or a checklist file under `todos/` in the pstack store, named in the first message | T3's Claude harness has no todo tool, and a file survives a pause and a pickup. |
 | Trunk | `origin/main` | `origin/lim` for pstack itself, the repo's default branch elsewhere | The fork's default branch is `lim`. 55-minute audit ticks re-read playbooks from `origin/lim`. |
