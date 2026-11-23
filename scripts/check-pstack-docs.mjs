@@ -25,8 +25,9 @@ const CLAIM = /\b(?:(all|has|of|ships|the|with) )?(\d+|[a-z]+(?:-[a-z]+)?) (shor
 const SLASH = /(?<=^|[\s`(|"'>])\/(?:pstack:)?([a-z][a-z0-9-]*)(?![\w/<-])/gm;
 const LINK = /\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g;
 const AGENT = /subagent_type: "([^"]+)"/g;
-const MODEL_ID = /\b(?:claude-[a-z]+|grok|gpt)-\d(?:[\w.-]*\w)?/g;
-const MODEL_PROSE = /\b(opus|sonnet|grok) (\d+(?:\.\d+)?)\b/gi;
+const MODEL_ID = /\b(?:claude-[a-z]+|grok|gpt|gemini|muse(?:-[a-z]+)*)-\d(?:[\w.-]*\w)?/g;
+const MODEL_PROSE = /\b(opus|sonnet|fable|grok|gpt|gemini|muse) (\d+(?:\.\d+)?)\b/gi;
+const CLAUDE_FAMILIES = new Set(["opus", "sonnet", "fable"]);
 
 function names(dir, keep) {
   return existsSync(dir) ? readdirSync(dir).filter((name) => keep(join(dir, name))).sort() : [];
@@ -118,8 +119,11 @@ for (const [doc, body] of text) {
     if (!setup.includes(id)) fail(doc, index, `names model ${id}, which setup-pstack does not use`);
   }
   for (const { 0: match, 1: family, 2: version, index } of body.matchAll(MODEL_PROSE)) {
-    const prefix = family.toLowerCase() === "grok" ? `grok-${version}` : `claude-${family.toLowerCase()}-${version.replace(".", "-")}`;
-    if (!setup.includes(prefix)) fail(doc, index, `says "${match}", but setup-pstack has no ${prefix} default`);
+    const name = family.toLowerCase();
+    const claude = CLAUDE_FAMILIES.has(name);
+    const prefix = claude ? `claude-${name}-${version.replace(".", "-")}` : `${name}-${version}`;
+    const id = claude ? prefix : `${name}-(?:[a-z]+-)*${version.replace(".", "\\.")}`;
+    if (!new RegExp(`\\b${id}(?![.-]?\\d)`).test(setup)) fail(doc, index, `says "${match}", but setup-pstack has no ${prefix} default`);
   }
 }
 
