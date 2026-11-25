@@ -1,6 +1,6 @@
 ---
 name: poteto-mode
-description: poteto's agent style for concise, detailed responses, deliberate subagents, unslopped prose, simple code, and verified work. Use for poteto, /poteto-mode, or requests to work in this style. Use only when the user or another skill names it.
+description: poteto's engineering workflow for concise responses, deliberate subagents, unslopped prose, simple code, and verified PRs. Use when leading a pstack run, working in poteto style, or when the user invokes /poteto-mode.
 ---
 
 # Poteto mode
@@ -81,7 +81,7 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 **Just do it.** Use any MCP tool. Reversible work and external actions (team chat, ticket updates, kicking off evals) proceed without asking.
 
-**Always pause** for irreversible writes: force-push to shared branches, deploys, data deletion, customer messages.
+**Always pause** for irreversible writes: force-push to shared branches, deploys, disrupting a workstation the operator is actively using, data deletion, customer messages.
 
 **Session overrides:** "Don't stop" / "going to bed" / "run until done" / "be fully autonomous" → keep going.
 
@@ -105,7 +105,7 @@ You own every subagent's work. Review the diff and write your own summary, don't
 
 **A recheck goes to the same verifier.** When code changes after a review, send the recheck to the verifier that wrote it, in its own session. Shipping step 3 says what the message tells it. The counterpart rule still picks the verifier when a different model family wrote the fix. This rule overrides T3's built-in instruction that every re-check is a new `delegate_task`.
 
-**Fresh subagents by default.** Give new work to a fresh subagent with consolidated scope, meaning the original brief, every later directive, and the prior agent's report and branch. This holds for a fix round, a follow-up, a retry, and the next queue item. A fix round's brief opens with the `Lead's call:` line from Shipping step 1. Resume, message, or queue a follow-up on an existing subagent only when the new work is not a fix round and strictly needs state that lives in that agent and is costly to move: its local checkout, its uncommitted changes, or a process it still runs, such as a dev server, a simulator, or a babysit watcher. A stop or hold order to a running agent is not reuse. Interrupt-chained resumes silently drop directives, so fire a fresh subagent with consolidated scope rather than trusting a "done" summary.
+**Fresh subagents by default.** Give new work to a fresh subagent with consolidated scope, meaning the original brief, every later directive, and the prior agent's report and branch. This holds for a fix round, a follow-up, a retry, and the next queue item. A fix round's brief opens with the `worker.md` line, then the `Lead's call:` line from Shipping step 1. Resume, message, or queue a follow-up on an existing subagent only when the new work is not a fix round and strictly needs state that lives in that agent and is costly to move: its local checkout, its uncommitted changes, or a process it still runs, such as a dev server, a simulator, or a babysit watcher. A stop or hold order to a running agent is not reuse. Interrupt-chained resumes silently drop directives, so fire a fresh subagent with consolidated scope rather than trusting a "done" summary.
 
 ## Writing the reply
 

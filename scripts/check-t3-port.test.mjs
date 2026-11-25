@@ -84,6 +84,7 @@ const accepted = [
   ["a folded description with a blank line", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, "description: >-\n  Explain why.\n\n  Use only when the user or another skill names it.")],
   ["disable-model-invocation: false", "pstack/skills/how/SKILL.md", (s) => s.replace("---\n", "---\ndisable-model-invocation: false\n")],
   ["a plain description that continues on the next line", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, "description: Explain why.\n  Use only when the user or another skill names it.")],
+  ["poteto-mode without the named-only ending", "pstack/skills/poteto-mode/SKILL.md", (s) => s.replace(/^description: .*$/m, "description: Lead a pstack run in poteto style.")],
   ["a Claude target with fast mode far from it", "pstack/skills/swarm/SKILL.md", (s) => s + '\n{"providerInstanceId": "claudeAgent", "options": {"effort": "high"}}\n' + "\n".repeat(10) + "For Grok use fastMode: true.\n"],
 ];
 

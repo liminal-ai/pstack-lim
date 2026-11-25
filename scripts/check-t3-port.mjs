@@ -92,7 +92,7 @@ const NEAR = 8;
 
 const NAMED_ONLY = "Use only when the user or another skill names it.";
 // These load from the user's own wording on purpose, so they skip the named-only ending.
-const AUTO_LOAD = new Set(["control-cli", "control-ui", "deslop", "setup-pstack"]);
+const AUTO_LOAD = new Set(["control-cli", "control-ui", "deslop", "poteto-mode", "setup-pstack"]);
 
 const REQUIRED = [
   ["pstack/skills/poteto-mode/SKILL.md", "delegate_task", "Subagents are T3 delegate_task children."],
