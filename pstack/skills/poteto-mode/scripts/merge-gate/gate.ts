@@ -549,8 +549,8 @@ export function strayAcceptances(facts: Facts): string[] {
 }
 
 export const isInstructionFile = (path: string): boolean => {
-  const name = path.split("/").pop()?.toLowerCase();
-  return name === "agents.md" || name === "claude.md";
+  const name = path.split("/").pop();
+  return name === "AGENTS.md" || name === "CLAUDE.md";
 };
 
 const met = (note: string, details?: readonly string[]): Result => ({

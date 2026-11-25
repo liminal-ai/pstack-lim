@@ -1274,7 +1274,7 @@ describe("merge-gate", () => {
     const approvalHash = (head: string) =>
       createHash("sha256")
         .update(
-          `${repos.git(repos.remote, "diff-tree", "-r", "--no-renames", "--full-index", "--abbrev=40", repos.main, head, "--", "AGENTS.md", "sub/Claude.md")}\n`
+          `${repos.git(repos.remote, "diff-tree", "-r", "--no-renames", "--full-index", "--abbrev=40", repos.main, head, "--", "AGENTS.md", "sub/CLAUDE.md")}\n`
         )
         .digest("hex");
     const approvedIn = "approved-in: 55835e2a-d498-4643-95ce-a3a0eb4f736b";
@@ -1290,7 +1290,7 @@ describe("merge-gate", () => {
       const result = await gate(withHead(repos.instructionHead));
       expect(result.exit).toBe(1);
       expect(result.missing[0]).toContain(
-        "The PR changes AGENTS.md, sub/Claude.md."
+        "The PR changes AGENTS.md, sub/CLAUDE.md."
       );
       expect(result.out).toContain(
         `\n  lee-approves-instruction-files: ${approvalHash(repos.instructionHead)}\n`
