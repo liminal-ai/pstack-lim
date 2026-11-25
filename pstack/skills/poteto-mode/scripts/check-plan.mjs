@@ -151,9 +151,7 @@ for (const pr of prSections) {
 		} else {
 			const text = gate.lines.map((l) => l.text).join("\n");
 			if (gateBoxes.length === 0) fail(gate.n, `${pr.title}: Review gate has no box`);
-			for (const word of ["screenshot", "video", "operator"]) {
-				if (!text.includes(word)) fail(gate.n, `${pr.title}: Review gate lacks "${word}"`);
-			}
+			if (!text.includes("operator")) fail(gate.n, `${pr.title}: Review gate lacks "operator"`);
 		}
 	}
 
