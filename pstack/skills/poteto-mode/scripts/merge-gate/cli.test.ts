@@ -56,7 +56,8 @@ function withAcceptance(
 
 async function gate(
   options: Partial<FakeOptions> & { readonly accept?: false } = {},
-  flags: readonly string[] = ["--check"]
+  flags: readonly string[] = ["--check"],
+  cwd = repos.gate
 ) {
   const head = options.pull?.headRefOid ?? repos.head;
   const github = fakeGitHub({
@@ -73,7 +74,7 @@ async function gate(
         : { ...options.atMerge, comments: withAcceptance(options.atMerge.comments, head) },
     pull: { headRefOid: repos.head, ...options.pull },
   });
-  const runtime = runtimeFor(github, repos.gate);
+  const runtime = runtimeFor(github, cwd);
   const exit = await main(["--repo", REPO, "--pr", "1", ...flags], runtime);
   const out = runtime.decision();
   const missing = out
@@ -1294,6 +1295,20 @@ describe("merge-gate", () => {
       expect(result.out).toContain(
         `\n  lee-approves-instruction-files: ${approvalHash(repos.instructionHead)}\n`
       );
+    });
+
+    it("prints the same approval hash from a directory inside the clone as from its root", async () => {
+      const nested = join(repos.gate, "deep", "er");
+      mkdirSync(nested, { recursive: true });
+      const hashLine = (out: string) =>
+        /lee-approves-instruction-files: ([0-9a-f]{64})/.exec(out)?.[1];
+      const fromRoot = hashLine((await gate(withHead(repos.instructionHead))).out);
+      const fromNested = hashLine(
+        (await gate(withHead(repos.instructionHead), ["--check"], nested)).out
+      );
+      expect(fromNested).toBe(approvalHash(repos.instructionHead));
+      expect(fromNested).toBe(fromRoot);
+      expect(fromNested).not.toBe(createHash("sha256").update("").digest("hex"));
     });
 
     it("is met when Lee approved this exact text in a T3 thread", async () => {
