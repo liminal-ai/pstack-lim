@@ -1,6 +1,6 @@
 ---
 name: reframe
-description: "Teach the expert words for what the operator is building, borrow words from neighboring fields that solved the same problem, then rewrite their description with them. Use for /reframe. Use only when the user or another skill names it."
+description: "Teach the expert words for what the operator is building, borrow words from neighboring fields that solved the same problem, then rewrite their description with them. Use for /reframe."
 ---
 
 Teach the operator the expert words for what they are building. Start from their own files, code and description, not a summary.

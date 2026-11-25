@@ -79,7 +79,7 @@ const BANNED = [
   {
     id: "hidden-skill",
     pattern: /^disable-model-invocation:\s*true\b/g,
-    fix: "Keep skills visible. End the description with \"Use only when the user or another skill names it.\"",
+    fix: "Keep every skill visible so it loads as a normal skill. Remove disable-model-invocation: true.",
   },
 ];
 
@@ -90,9 +90,7 @@ const BANNED = [
 const CLAUDE_PROVIDER = /["']?providerInstanceId["']?\s*:\s*["']claudeAgent["']/;
 const NEAR = 8;
 
-const NAMED_ONLY = "Use only when the user or another skill names it.";
-// These load from the user's own wording on purpose, so they skip the named-only ending.
-const AUTO_LOAD = new Set(["control-cli", "control-ui", "deslop", "poteto-mode", "setup-pstack"]);
+const NAMED_ONLY = /Use\s+only\s+when\s+the\s+user\s+or\s+another\s+skill\s+names\s+it\.?/g;
 
 const REQUIRED = [
   ["pstack/skills/poteto-mode/SKILL.md", "delegate_task", "Subagents are T3 delegate_task children."],
@@ -135,20 +133,6 @@ function walk(dir) {
   });
 }
 
-function description(text) {
-  const front = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
-  const lines = front.split("\n");
-  const at = lines.findIndex((l) => /^description:/.test(l));
-  if (at < 0) return "";
-  const head = lines[at].replace(/^description:\s*/, "");
-  const body = /^[>|][-+]?$/.test(head) ? [] : [head];
-  for (const line of lines.slice(at + 1)) {
-    if (line.trim() && !/^\s/.test(line)) break;
-    body.push(line.trim());
-  }
-  return body.join(" ").replace(/\s+/g, " ").trim().replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
-}
-
 const failures = [];
 const fail = (where, id, fix) => failures.push(`${where}  [${id}]  ${fix}`);
 const pendingSeen = PENDING.map(() => 0);
@@ -174,13 +158,15 @@ for (const path of [...SCANNED, AUTOMATIONS].flatMap((d) => walk(join(root, d)))
       fail(`${file}:${i + 1}`, "claude-fast-default", "Claude target examples never mention fastMode. The Speed rule in poteto-mode owns Claude fast mode.");
     }
   });
-}
-
-for (const path of walk(join(root, "pstack/skills")).filter((p) => p.endsWith("/SKILL.md"))) {
-  const file = relative(root, path);
-  const name = file.split("/").at(-2);
-  if (!AUTO_LOAD.has(name) && !description(readFileSync(path, "utf-8")).endsWith(NAMED_ONLY)) {
-    fail(file, "named-only", `End the description with "${NAMED_ONLY}" or add the skill to AUTO_LOAD with a reason.`);
+  if (!automation) {
+    for (const match of text.matchAll(NAMED_ONLY)) {
+      const line = text.slice(0, match.index).split("\n").length;
+      fail(
+        `${file}:${line}`,
+        "named-only",
+        'Remove "Use only when the user or another skill names it." Every pstack skill loads as a normal skill since round 2026-11-25.',
+      );
+    }
   }
 }
 

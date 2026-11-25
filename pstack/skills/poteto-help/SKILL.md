@@ -1,6 +1,6 @@
 ---
 name: poteto-help
-description: Guides users through pstack setup, /poteto-mode, and picking the skill, playbook, or principle for a task. Type /poteto-help with a question. Use only when the user or another skill names it.
+description: Guides users through pstack setup, /poteto-mode, and picking the skill, playbook, or principle for a task. Type /poteto-help with a question.
 ---
 
 # Poteto help
@@ -38,7 +38,7 @@ When a role line is missing and it matters, ask whether the user wants to pick t
 2. Run [`/setup-pstack`](../setup-pstack/SKILL.md) from a v2 thread. It asks for a reasoning budget, maps a model to each role from `orchestrator_capabilities`, and writes the pstack roles section of the role file (`~/lim-v2/AGENTS.md`, which `~/lim-v2/CLAUDE.md` links to). The file loads into new threads. Then it offers once each to generate a verification skill and a formal verification skill for the project, unless the project already has one.
 3. Start a real task with `/poteto-mode`, a goal, and a check that can pass or fail.
 
-Installing changes nothing until the user invokes a skill. Only `/setup-pstack`, `deslop`, `control-ui`, and `control-cli` load from the user's words. The [README](../../README.md) and [guide page 1](../../docs/guide/01-setup.md) have the details. Offer to word their first prompt with them, per [`references/prompting.md`](references/prompting.md).
+Every installed pstack skill is visible and can load from the user's words or when named directly. The [README](../../README.md) and [guide page 1](../../docs/guide/01-setup.md) have the details. Offer to word their first prompt with them, per [`references/prompting.md`](references/prompting.md).
 
 If cost is the worry, say where the tokens go and how to spend fewer. pstack spends extra tokens on subagents and review panels. Rerun `/setup-pstack` and pick a smaller budget or cheaper models. A role set to `auto` or `inherit-parent` runs on the chat's model, which saves tokens when the chat runs on Auto or a cheaper model. A shorter panel list runs fewer subagents, one for each entry. Save `/poteto-mode` for work that needs rigor.
 
@@ -135,7 +135,7 @@ Principles are one-rule skills that `/poteto-mode` reads and cites in its replie
 | A question got treated as the next step of the last task | Say "new task", or say the turn doesn't need the mode. |
 | A new model choice had no effect | The role file loads into new threads. Start one, and check the line is in `~/lim-v2/AGENTS.md`. |
 | Runs cost more than expected | See the cost paragraph under Get set up. |
-| A skill didn't load on its own | Only `/setup-pstack`, `deslop`, `control-ui`, and `control-cli` load from the user's words. The others load when the user types them or when `/poteto-mode` runs them, and it doesn't run every skill. |
+| A skill didn't load on its own | Every pstack skill can load from the user's words, though a model may skip one when the prompt doesn't match its description. Type `/<skill-name>` to invoke it directly. |
 | Parallel agents overwrote each other | Give each agent its own worktree, or run them as cloud agents, which each get their own machine. |
 | An overnight run moved but finished nothing | `/loop` needs a check that can pass or fail, not a duration. See [guide page 7](../../docs/guide/07-overnight.md). |
 | The reply claims success from a green build | Ask for the real command, flow, stored value, or profile. That's the prove-it-works principle. |
