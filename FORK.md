@@ -2,14 +2,14 @@
 
 Read this file before you merge from upstream, push, open a PR, or merge one.
 
-Fork of `cursor/plugins`, default branch `lim`. Fork point: upstream `11713c6` (pstack 0.15.17). Last synced: upstream `7a583913` (pstack 0.15.46), recorded in `FORK-SYNC-LOG.md`. Install only from `pstack/`, never the repo root; for the `/orchestrate` name clash see `poteto-help`. Role-file setup lives in `setup-pstack`.
+Fork of `cursor/plugins`, default branch `lim`. Fork point: upstream `11713c6` (pstack 0.15.17). Last synced: upstream `41e40093` (pstack 0.15.48), recorded in `FORK-SYNC-LOG.md`. Install only from `pstack/`, never the repo root; for the `/orchestrate` name clash see `poteto-help`. Role-file setup lives in `setup-pstack`.
 
 ## Upstream drift
 
 ```bash
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/cursor/plugins.git
 git fetch --multiple upstream origin
-SYNC=7a583913eb1b8d1a0ee76753d1a2cf072e7b54f9   # last synced upstream commit; set it to the new tip after each sync
+SYNC=41e400932eca14f289e7db717a70455256b6d388   # last synced upstream commit; set it to the new tip after each sync
 git log --oneline $SYNC..upstream/main -- pstack cursor-team-kit/skills     # upstream commits since the last sync
 git show upstream/main:pstack/.cursor-plugin/plugin.json | rg version        # upstream pstack version
 comm -12 <(git diff --name-only $SYNC upstream/main -- pstack | sort) \
