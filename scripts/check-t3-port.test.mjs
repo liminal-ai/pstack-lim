@@ -52,6 +52,8 @@ const regressions = [
   ["claude-fast-default", "pstack/skills/swarm/SKILL.md", (s) => s + '\n```json\n{"target": {\n  "providerInstanceId": "claudeAgent",\n  "model": "claude-opus-5-5",\n  "options": {"effort": "high", "fastMode": true}\n}}\n```\n'],
   ["named-only", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, "description: >-\n  Explain why.\n\n  Use only when the user or another skill names it.")],
   ["named-only", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, "description: Explain why.\n  Use only when the user or\n  another skill names it.")],
+  ["named-only", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, 'description: "Explain why. Use only when the user or \\\n  another skill names it."')],
+  ["named-only", "pstack/skills/why/SKILL.md", (s) => s.replace(/^description: .*$/m, 'description: "Explain why. use only when the user or another skill names it."')],
   ["named-only", "pstack/skills/automate-me/SKILL.md", (s) => s + '\nEnd description with "Use only when the user or another skill names it."\n'],
   ["claude-fast-default", "pstack/skills/swarm/SKILL.md", (s) => s + '\n{"target":{"options":{"fastMode":true},"providerInstanceId":"claudeAgent","model":"claude-opus-5-5"}}\n'],
   ["claude-fast-default", "pstack/skills/swarm/SKILL.md", (s) => s + "\nconst target = { providerInstanceId: 'claudeAgent', model: 'claude-opus-5-5', options: { fastMode: true } };\n"],

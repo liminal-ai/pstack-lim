@@ -90,7 +90,10 @@ const BANNED = [
 const CLAUDE_PROVIDER = /["']?providerInstanceId["']?\s*:\s*["']claudeAgent["']/;
 const NEAR = 8;
 
-const NAMED_ONLY = /Use\s+only\s+when\s+the\s+user\s+or\s+another\s+skill\s+names\s+it\.?/g;
+const NAMED_ONLY = new RegExp(
+  ["Use", "only", "when", "the", "user", "or", "another", "skill", "names", "it\\.?"].join("(?:\\s|\\\\\\r?\\n)+"),
+  "gi",
+);
 
 const REQUIRED = [
   ["pstack/skills/poteto-mode/SKILL.md", "delegate_task", "Subagents are T3 delegate_task children."],
