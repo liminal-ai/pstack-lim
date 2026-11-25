@@ -60,7 +60,6 @@ export interface Repos {
   readonly changedHead: string;
   /** The feature plus a doc fix. */
   readonly docHead: string;
-  /** The feature plus AGENTS.md and sub/Claude.md, first text. */
   readonly instructionHead: string;
   /** The feature plus the instruction files with edited text. */
   readonly editedInstructionHead: string;
@@ -102,12 +101,12 @@ export function makeRepos(): Repos {
   );
   branchFrom(head);
   const instructionHead = commit(
-    { "AGENTS.md": "v1\n", "sub/Claude.md": "c1\n" },
+    { "AGENTS.md": "v1\n", "sub/CLAUDE.md": "c1\n", "features/agents.md": "notes\n" },
     "instructions v1"
   );
   branchFrom(head);
   const editedInstructionHead = commit(
-    { "AGENTS.md": "v2\n", "sub/Claude.md": "c1\n" },
+    { "AGENTS.md": "v2\n", "sub/CLAUDE.md": "c1\n" },
     "instructions v2"
   );
 

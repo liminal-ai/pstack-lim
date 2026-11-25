@@ -213,22 +213,22 @@ export class Git {
       .filter((path) => path !== "");
   }
 
-  /** sha256 of `git diff-tree -r --no-renames --full-index --abbrev=40 <base> <head> -- <paths>`. */
   diffHash(base: string, head: string, paths: readonly string[]): string {
-    const diff = this.git(
-      [
-        "diff-tree",
-        "-r",
-        "--no-renames",
-        "--full-index",
-        "--abbrev=40",
-        base,
-        head,
-        "--",
-        ...paths,
-      ],
-      { GIT_LITERAL_PATHSPECS: "1" }
-    );
+    const diff = this.git([
+      "diff-tree",
+      "-r",
+      "--no-renames",
+      "--full-index",
+      "--abbrev=40",
+      base,
+      head,
+      "--",
+      ...paths.map((path) => `:(top,literal)${path}`),
+    ], { GIT_LITERAL_PATHSPECS: "0" });
+    if (paths.length > 0 && diff === "")
+      throw new ReadError(
+        `git diff-tree ${base} ${head} printed no change for ${paths.join(", ")}, so there is no diff to hash.`
+      );
     return createHash("sha256").update(diff).digest("hex");
   }
 }
