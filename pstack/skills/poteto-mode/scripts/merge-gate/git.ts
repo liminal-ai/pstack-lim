@@ -224,7 +224,7 @@ export class Git {
       head,
       "--",
       ...paths.map((path) => `:(top,literal)${path}`),
-    ]);
+    ], { GIT_LITERAL_PATHSPECS: "0" });
     if (paths.length > 0 && diff === "")
       throw new ReadError(
         `git diff-tree ${base} ${head} printed no change for ${paths.join(", ")}, so there is no diff to hash.`
