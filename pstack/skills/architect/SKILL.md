@@ -1,6 +1,6 @@
 ---
 name: architect
-description: "Sketch two shapes for a change (types, signatures, module boundaries) before code, and pick the one with the cleanest ownership. Use for /architect, 'architect this', 'design this', or non-trivial work where jumping to code would lock in the wrong shape. Use only when the user or another skill names it."
+description: "Sketch two shapes for a change (types, signatures, module boundaries) before code, and pick the one with the cleanest ownership. Use for /architect, 'architect this', 'design this', or non-trivial work where jumping to code would lock in the wrong shape."
 ---
 
 # Architect

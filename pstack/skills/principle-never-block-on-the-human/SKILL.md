@@ -1,6 +1,6 @@
 ---
 name: principle-never-block-on-the-human
-description: "Apply when tempted to ask 'should I do X?' on reversible work. Use only when the user or another skill names it."
+description: "Apply when tempted to ask 'should I do X?' on reversible work."
 ---
 
 # Never Block on the Human

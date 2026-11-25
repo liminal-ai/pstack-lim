@@ -4,7 +4,6 @@ description: >-
   Use when building a custom UI (page, dashboard, buttons) that should wake a
   T3 agent thread over a webhook, when the user provides a webhook signing key,
   or when exposing that UI on Tailscale.
-  Use only when the user or another skill names it.
 ---
 # How to make a bot UI
 

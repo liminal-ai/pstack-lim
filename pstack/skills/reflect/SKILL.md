@@ -1,6 +1,6 @@
 ---
 name: reflect
-description: Spawn three parallel review subagents over the active transcript, record what happened with evidence and a classification, and save it for the next retro round. Applies nothing. Use when the user says reflect. Use only when the user or another skill names it.
+description: Spawn three parallel review subagents over the active transcript, record what happened with evidence and a classification, and save it for the next retro round. Applies nothing. Use when the user says reflect.
 ---
 
 # Reflect

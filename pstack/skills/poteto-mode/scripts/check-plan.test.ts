@@ -226,3 +226,18 @@ test("requires the live block to name its model and the verify skill that drives
 	const legacy = runText(validPlan.replace("Lanes on `example-model` at the PR head, driven through `verify-example`.", "Ten lanes on `example-model` at the PR head."), 0);
 	expect(legacy.stderr).toBe("");
 });
+
+test("accepts an operator-requested review gate without requiring both screenshot and video", () => {
+	const gated = validPlan.replace(
+		"**Review gate.** None.",
+		"**Review gate.** The operator reviews before merge.\n- [ ] Post the narrated demo in chat and stop at merge-ready until the operator answers.",
+	);
+	expect(runText(gated, 0).stderr).toBe("");
+	const noneWithBox = validPlan.replace("**Review gate.** None.", "**Review gate.** None.\n- [ ] Extra box.");
+	expect(runText(noneWithBox, 1).stderr).toContain("Review gate says None but has boxes");
+	const missingOperator = validPlan.replace(
+		"**Review gate.** None.",
+		"**Review gate.** Review before merge.\n- [ ] Post the narrated demo in chat.",
+	);
+	expect(runText(missingOperator, 1).stderr).toContain('Review gate lacks "operator"');
+});
