@@ -120,3 +120,12 @@ Files by PR, from `git diff --name-only 4dd1d05..7a583913 -- pstack` (112 files)
 - Skipped, Orchestrate kept (1): `pstack/skills/poteto-mode/playbooks/orchestrate.md`.
 - Skipped, Speed clauses the fork no longer has (7): `pstack/skills/automate-me/SKILL.md`, `pstack/skills/poteto-mode/playbooks/autonomous-run.md`, `pstack/skills/poteto-mode/playbooks/eval.md`, `pstack/skills/poteto-mode/playbooks/runtime-forensics.md`, `pstack/skills/poteto-mode/playbooks/session-pickup.md`, `pstack/skills/poteto-mode/playbooks/trace-forensics.md`, `pstack/skills/poteto-mode/playbooks/worktree-cleanup.md`.
 - Skipped, fork process rows and metadata (16): `pstack/skills/poteto-mode/playbooks/multi-phase-plan.md`, `pstack/skills/poteto-mode/playbooks/opening-a-pr.md`, `pstack/skills/poteto-mode/playbooks/autopilot-full.md`, `pstack/skills/poteto-mode/playbooks/autopilot-stack.md`, `pstack/skills/benchmark-checklist/SKILL.md`, `pstack/skills/poteto-mode/scripts/check-plan.mjs`, `pstack/skills/poteto-mode/scripts/check-plan.test.ts`, `pstack/skills/poteto-mode/scripts/package.json`, `pstack/skills/reflect/**`, `pstack/.cursor-plugin/plugin.json`, `pstack/plugin.json`, `pstack/docs/harness/claude-code.md`.
+
+## Sync 6: 7a583913 to 41e40093 (pstack 0.15.46 to 0.15.48)
+
+Retro round 2026-11-25, stop 8. Upstream `main` was `41e40093` at the sync. Its last commit under `pstack/` is `9e278fe4`. Upstream's `harness/` copies and `pstack/plugin.json`, which the fork does not carry, are left out (Install row).
+
+| Upstream | Subject | Decision | PR | Reason |
+|---|---|---|---|---|
+| `2dd5c0cc` | feat(pstack): add /reframe to learn the expert words for what you're building (#1324) | adapt | this | skill taken at upstream's tip with 9e278fe4. Visible, the description ends with the named-only sentence, no `disable-model-invocation` (Skill visibility row). `poteto-help`, `README.md` and `docs/guide/02-poteto-mode.md` lines taken unchanged. `pstack/plugin.json` and `harness/` copies left out (Install row). Version bump left out |
+| `9e278fe4` | feat(pstack): have /reframe list the problems a vague description could be (#1326) | take | this | taken with 2dd5c0cc at upstream's tip. Vague-description disambiguation paragraph in `reframe/SKILL.md` and updated `README.md` row taken unchanged. `pstack/plugin.json` and `harness/` copies left out (Install row). Version bump left out |
