@@ -1,6 +1,6 @@
 ---
 name: poteto-mode
-description: poteto's engineering workflow for concise responses, deliberate subagents, unslopped prose, simple code, and verified PRs. Use when leading a pstack run, working in poteto style, or when the user invokes /poteto-mode.
+description: poteto's agent style for concise, detailed responses, deliberate subagents, unslopped prose, simple code, and verified work. Use for poteto, /poteto-mode, or requests to work in this style.
 ---
 
 # Poteto mode
