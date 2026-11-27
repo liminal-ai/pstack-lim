@@ -166,6 +166,9 @@ function pendingReflects(thread, rounds) {
   return thread.reflects.filter((c) => !taken.has(c.dir));
 }
 
+// Only a reflect that names the window it read is a review of an agent's new history.
+const freshReflects = (thread, rounds) => pendingReflects(thread, rounds).filter((c) => c.window);
+
 function statusOf(thread, rounds) {
   const inRounds = rounds.filter((r) => r.threads.includes(thread.thread));
   const open = inRounds.find((r) => !r.closedAt);
@@ -298,6 +301,20 @@ function isExport(dir) {
   }
 }
 
+// A slice carries a MANIFEST.json of its own, so it is kept out of the backup wherever it is copied.
+const isSlice = (dir) => isExport(dir) && Boolean(JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf-8")).slice);
+
+function insideExport(path) {
+  for (let p = dirname(path); p !== dirname(p); p = dirname(p)) if (isExport(p)) return true;
+  return false;
+}
+
+// A trail or input must be a whole export, never part of one, and never transcript text taken out of one.
+function refusePartOfExport(path, what) {
+  const target = real(path);
+  if (isSlice(target) || insideExport(target) || basename(target) === "activity.jsonl") refuse(`${what} ${path} is part of a thread export or a slice of one, which must never be backed up; pass the export folder itself`);
+}
+
 function findExports(dir) {
   if (!existsSync(dir)) return [];
   if (isExport(dir)) return [dir];
@@ -314,6 +331,9 @@ function digest(path) {
 
 // A copied .git would reach the backup as a bare gitlink, so copies keep only the files.
 function copyResolved(src, dest) {
+  if (lstatSync(src).isSymbolicLink() && (isSlice(real(src)) || insideExport(real(src)))) {
+    return console.error(`warning: ${src} links into a thread export or a slice, so it is not copied`);
+  }
   if (statSync(src).isDirectory()) {
     mkdirSync(dest);
     for (const name of readdirSync(src)) if (name !== ".git") copyResolved(join(src, name), join(dest, name));
@@ -329,6 +349,7 @@ function current(rec, source) {
 // Every check and read happens here, before anything is copied, so a refusal leaves nothing behind.
 function planTrail(rec, path) {
   const source = resolve(path);
+  if (existsSync(source)) refusePartOfExport(source, "trail");
   const last = current(rec, source);
   if (!existsSync(source)) {
     if (last?.mode === "copied" && existsSync(last.path)) return { kind: "keep", source, path: last.path };
@@ -793,15 +814,16 @@ function cmdOpen(args) {
   for (const id of ids) {
     const t = state.threads.get(id);
     if (!t) refuse(`thread ${id} is not registered; run register first`);
+    if (t.longRunning?.active && !freshReflects(t, state.rounds).length) refuse(`${agentName(t)} is a long-running agent with no reflect of its new window; reflect it first, registering the window slice printed, then open the round`);
     const s = statusOf(t, state.rounds);
     if (s.kind === "retrod") refuse(`thread ${id} was retro'd in round ${s.round} and has not reflected since`);
-    if (t.longRunning?.active && !pendingReflects(t, state.rounds).length) refuse(`${agentName(t)} is a long-running agent with no reflect of its new window; reflect it first, then open the round`);
   }
   // A long-running agent joins a round only with a fresh reflect, so the default never leaves an overdue one out without saying so.
-  const unreflected = args.threads === undefined && !args.earlier ? longRunningAgents(state, now()).filter((a) => a.overdue && !pendingReflects(a.t, state.rounds).length) : [];
+  const unreflected = args.threads === undefined && !args.earlier ? longRunningAgents(state, now()).filter((a) => a.overdue && !freshReflects(a.t, state.rounds).length) : [];
   if (unreflected.length) refuse(`long-running agent${unreflected.length === 1 ? "" : "s"} ${unreflected.map((a) => agentName(a.t)).join(", ")} ${unreflected.length === 1 ? "is" : "are"} past the days allowed with no reflect of the new window; reflect ${unreflected.length === 1 ? "it" : "them"} first, then open the round, or name the threads to include with --threads`);
   if (ids.length === 0 && !args.earlier) refuse("no threads are waiting; pass --threads to choose some");
   for (const p of args.input) if (!existsSync(p)) refuse(`input not found: ${p}`);
+  for (const p of args.input) refusePartOfExport(resolve(p), "input");
   mkdirSync(ROUNDS, { recursive: true });
   for (const p of args.input) if (within(real(ROUNDS), real(p))) refuse(`input ${p} contains the rounds folder; name something inside it instead`);
   const reflects = ids.flatMap((id) => pendingReflects(state.threads.get(id), state.rounds).map((c) => c.dir));
@@ -1092,9 +1114,10 @@ function cmdSlice(args) {
     else segments.push({ day: d, epoch, rows: [row] });
   }
   const window = rows.slice(from, to + 1);
+  const stillRunning = window.filter(unfinished).map((r) => r.seq);
   const count = (kind) => window.filter((r) => sliceKind(r) === kind).length;
   const rendered = window.map(renderRow).filter((l) => l !== null).reduce((n, l) => n + l.length + 1, 0);
-  const chunks = rendered > CHUNK_CHARS ? packChunks(segments) : [];
+  const chunks = packChunks(segments);
   const throughAt = utc(rowTime(rows[to]));
   const out = join(source, `slice-${from}-${to}`);
   const chunkName = (i) => `chunks/chunk-${String(i + 1).padStart(2, "0")}.md`;
@@ -1109,9 +1132,10 @@ function cmdSlice(args) {
     "",
     `Totals: ${count("person")} from the person, ${count("tick")} scheduled ticks, ${count("prompt")} from other threads or agents, ${count("compaction")} compactions, ${count("error")} errors, ${count("interrupt")} interrupts.`,
     "",
-    ...(chunks.length
-      ? [`The window renders to ${rendered} characters, so it is split into ${chunks.length} chunks at day and compaction boundaries:`, "", ...chunks.map((c, i) => `- \`${chunkName(i)}\`: seq ${c.from}–${c.to}`)]
-      : [`The window renders to ${rendered} characters, small enough for one reader, so it has no chunks. Read it from the activity.jsonl lines with seq ${from} to ${to}.`]),
+    `The window renders to ${rendered} characters in ${chunks.length === 1 ? "one chunk" : `${chunks.length} chunks, split at day and compaction boundaries`}. Read the chunks, and read an item in activity.jsonl only to check a piece of evidence and the items around it:`,
+    "",
+    ...chunks.map((c, i) => `- \`${chunkName(i)}\`: seq ${c.from}–${c.to}`),
+    ...(stillRunning.length ? ["", `Still running at export, so read as they were then: seq ${stillRunning.join(", ")}.`] : []),
     "",
     ...Object.entries(Object.groupBy(segments, (s) => s.day)).flatMap(([d, segs]) => [`## ${d}`, "", ...segs.flatMap(segmentIndex)]),
   ];
@@ -1119,8 +1143,10 @@ function cmdSlice(args) {
   const staged = `${out}.tmp-${process.pid}`;
   rmSync(staged, { recursive: true, force: true });
   mkdirSync(staged, { recursive: true });
+  const { thread, exportedAt } = JSON.parse(readFileSync(join(source, "MANIFEST.json"), "utf-8"));
+  writeFileSync(join(staged, "MANIFEST.json"), `${JSON.stringify({ thread, exportedAt, slice: { fromSeq: from, toSeq: to } }, null, 2)}\n`);
   writeFileSync(join(staged, "index.md"), `${index.join("\n").trimEnd()}\n`);
-  if (chunks.length) mkdirSync(join(staged, "chunks"));
+  mkdirSync(join(staged, "chunks"));
   chunks.forEach((c, i) => {
     const head = [`# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. It covers every item from seq ${c.from} to ${c.to}, but leaves out reasoning and checkpoints and cuts long text. Read the item at its seq in activity.jsonl for all of it.`, ""];
     writeFileSync(join(staged, chunkName(i)), `${[...head, ...c.parts].join("\n").trimEnd()}\n`);
@@ -1128,7 +1154,7 @@ function cmdSlice(args) {
   rmSync(out, { recursive: true, force: true });
   renameSync(staged, out);
   console.log(out);
-  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${to < asked ? `seq ${to + 1}–${asked} still running, left for the next window; ` : ""}${chunks.length ? `${chunks.length} chunk${chunks.length === 1 ? "" : "s"}` : "no chunks"}`);
+  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${to < asked ? `seq ${to + 1}–${asked} still running, left for the next window; ` : ""}${chunks.length} chunk${chunks.length === 1 ? "" : "s"}`);
 }
 
 function cmdMigratePaths() {

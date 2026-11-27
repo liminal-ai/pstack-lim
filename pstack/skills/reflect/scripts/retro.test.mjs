@@ -1375,16 +1375,19 @@ const smallExport = (t) =>
     tick("2026-11-02T09:00:00Z"),
   ]);
 
-test("slice maps a small window by day and compaction, keeps the person apart from scheduled ticks, and writes no chunks", (t) => {
+test("slice maps a small window by day and compaction, keeps the person apart from scheduled ticks, and writes a small window as one chunk", (t) => {
   const dir = smallExport(t);
   const r = sliceRun(t, [dir]);
   assert.equal(r.code, 0, r.err);
   const out = join(dir, "slice-0-10");
-  assert.equal(r.out, `${out}\nwindow: --from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z; no chunks\n`);
-  assert.ok(!existsSync(join(out, "chunks")));
+  assert.equal(r.out, `${out}\nwindow: --from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z; 1 chunk\n`);
+  assert.deepEqual(readdirSync(join(out, "chunks")), ["chunk-01.md"]);
+  assert.match(readFileSync(join(out, "chunks", "chunk-01.md"), "utf-8"), /\[seq 9 08:00 person\] No, stop that\./);
   const index = readFileSync(join(out, "index.md"), "utf-8");
   assert.match(index, /^# Window seq 0–10\n/);
   assert.match(index, /Days and times are UTC\./);
+  assert.match(index, /in one chunk\. Read the chunks, and read an item in activity\.jsonl only to check a piece of evidence and the items around it:\n\n- `chunks\/chunk-01\.md`: seq 0–10\n/);
+  assert.doesNotMatch(index, /Still running/);
   assert.match(index, /Register the reflect over it with `--from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z`/);
   assert.match(index, /Totals: 2 from the person, 3 scheduled ticks, 1 from other threads or agents, 1 compactions, 1 errors, 0 interrupts\./);
   assert.match(index, /## 2026-11-01\n\n### seq 0–5, before the first compaction \(6 items\)\n\n- From the person: 1\n  - seq 0, 09:00: Please set up the nightly job\.\n- Scheduled ticks from `scheduled-task:[^`]+`: 2, seq 4–5\n/);
@@ -1424,8 +1427,10 @@ test("slice ends the window before the items still running at its end, and says 
   writeFileSync(join(dir, "activity.jsonl"), `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`);
   const r = sliceRun(t, [dir]);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /window: --from-seq 0 --to-seq 2 --through-at 2026-11-01T09:01:00Z; seq 3–4 still running, left for the next window; no chunks\n$/, "an unfinished item before a finished one stays in the window");
-  assert.match(readFileSync(join(dir, "slice-0-2", "index.md"), "utf-8"), /Seq 3–4 were still running at export, so this window ends at seq 2 and the next one starts with them\./);
+  assert.match(r.out, /window: --from-seq 0 --to-seq 2 --through-at 2026-11-01T09:01:00Z; seq 3–4 still running, left for the next window; 1 chunk\n$/, "an unfinished item before a finished one stays in the window");
+  const index = readFileSync(join(dir, "slice-0-2", "index.md"), "utf-8");
+  assert.match(index, /Seq 3–4 were still running at export, so this window ends at seq 2 and the next one starts with them\./);
+  assert.match(index, /Still running at export, so read as they were then: seq 1\./);
   assert.match(sliceRun(t, [dir, "--from-seq", "3"]).err, /nothing new to reflect from seq 3: seq 3–4 are still running/);
 });
 
@@ -1460,7 +1465,7 @@ test("slice splits a large window into chunks at day and compaction boundaries t
   assert.equal(covered[0][0], 0);
   assert.equal(covered.at(-1)[1], entries.length - 1);
   for (let i = 1; i < covered.length; i++) assert.equal(covered[i][0], covered[i - 1][1] + 1, "chunk ranges meet even where a left-out reasoning row sits at the edge");
-  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /split into \d chunks at day and compaction boundaries:\n\n- `chunks\/chunk-01\.md`: seq 0–/);
+  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /in \d chunks, split at day and compaction boundaries\. Read the chunks[^\n]*\n\n- `chunks\/chunk-01\.md`: seq 0–/);
   assert.equal(sliceRun(t, [dir]).code, 0);
   assert.deepEqual(readdirSync(join(out, "chunks")).sort().map((name) => readFileSync(join(out, "chunks", name), "utf-8")), texts, "a rerun writes the same chunks");
 });
@@ -1503,7 +1508,8 @@ test("a rerun replaces only its own slice folder", (t) => {
   writeFileSync(join(dir, "notes.md"), "mine\n");
   const before = readFileSync(join(dir, "activity.jsonl"), "utf-8");
   assert.equal(sliceRun(t, [dir]).code, 0);
-  assert.deepEqual(readdirSync(join(dir, "slice-0-10")), ["index.md"]);
+  assert.deepEqual(readdirSync(join(dir, "slice-0-10")).sort(), ["MANIFEST.json", "chunks", "index.md"]);
+  assert.deepEqual(readdirSync(join(dir, "slice-0-10", "chunks")), ["chunk-01.md"]);
   assert.equal(readFileSync(join(dir, "slice-0-9", "index.md"), "utf-8"), "another window\n");
   assert.equal(readFileSync(join(dir, "notes.md"), "utf-8"), "mine\n");
   assert.equal(readFileSync(join(dir, "activity.jsonl"), "utf-8"), before);
@@ -1558,4 +1564,86 @@ test("an overdue long-running agent joins a round only after a fresh reflect, wi
   assert.deepEqual(round.threads.sort(), [A, B].sort());
   assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
   assert.match(run(["status"], "2026-10-18T09:00:00Z", env).out, /long-running agents: 0 of 1 overdue \(steward: last retro 2026-10-17, 1 day ago, 14 allowed\)/);
+});
+
+test("a large export with little conversation is still read from its rendered chunk, never from the raw window", (t) => {
+  const entries = Array.from({ length: 300 }, (_, i) => ["command_execution", `2026-11-01T09:${String(i % 60).padStart(2, "0")}:00Z`, { input: "cat big.log", output: "y".repeat(10000), exitCode: 0 }]);
+  entries.unshift(person("2026-11-01T08:00:00Z", "Look at the log."));
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  assert.ok(readFileSync(join(dir, "activity.jsonl")).length > 3000000);
+  const r = sliceRun(t, [dir]);
+  assert.match(r.out, /; 1 chunk\n$/);
+  const chunk = readFileSync(join(dir, "slice-0-300", "chunks", "chunk-01.md"), "utf-8");
+  assert.ok(chunk.length < 100000, `the chunk is ${chunk.length} characters`);
+  assert.doesNotMatch(readFileSync(join(dir, "slice-0-300", "index.md"), "utf-8"), /lines with seq/);
+});
+
+test("a slice carries an export's marker, so the backup leaves it out wherever it is copied", (t) => {
+  const { store, run } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const dir = smallExport(t);
+  assert.equal(run(["slice", dir], undefined, { TZ: "UTC" }).code, 0);
+  const slice = join(dir, "slice-0-10");
+  assert.deepEqual(JSON.parse(readFileSync(join(slice, "MANIFEST.json"), "utf-8")), { thread: A, exportedAt: "2026-11-03T00:00:00Z", slice: { fromSeq: 0, toSeq: 10 } });
+  const loose = join(scratchDir(t), "loose-slice");
+  cpSync(slice, loose, { recursive: true });
+  const trail = join(scratchDir(t), "run-folder");
+  mkdirSync(trail);
+  writeFileSync(join(trail, "notes.md"), "notes\n");
+  cpSync(slice, join(trail, "copied-slice"), { recursive: true });
+  assert.equal(run(["register", A, "--trail", trail]).code, 0);
+  const files = pushedFiles();
+  assert.ok(files.some((f) => f.endsWith("/notes.md")));
+  assert.deepEqual(files.filter((f) => /index\.md|chunk-|MANIFEST/.test(f)), []);
+  assert.match(run(["register", A, "--trail", loose]).err, /is part of a thread export or a slice of one/, "a slice on its own is refused");
+});
+
+test("register and open refuse part of an export or a slice, and a trail's link into one is not copied, all through the real backup", (t) => {
+  const { store, run, reflect } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const dir = smallExport(t);
+  assert.equal(run(["slice", dir], undefined, { TZ: "UTC" }).code, 0);
+  const slice = join(dir, "slice-0-10");
+  const refused = /is part of a thread export or a slice of one, which must never be backed up; pass the export folder itself/;
+  assert.match(run(["register", A, "--trail", slice]).err, refused);
+  assert.match(run(["register", A, "--trail", join(slice, "index.md")]).err, refused);
+  assert.match(run(["register", A, "--trail", join(dir, "activity.jsonl")]).err, refused);
+  const loose = join(scratchDir(t), "activity.jsonl");
+  cpSync(join(dir, "activity.jsonl"), loose);
+  assert.match(run(["register", A, "--trail", loose]).err, refused, "an activity.jsonl taken out of its export");
+  const linked = join(scratchDir(t), "linked");
+  mkdirSync(linked);
+  writeFileSync(join(linked, "notes.md"), "notes\n");
+  symlinkSync(slice, join(linked, "to-slice"));
+  symlinkSync(join(slice, "index.md"), join(linked, "to-index.md"));
+  const r = run(["register", A, "--trail", linked]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /links into a thread export or a slice, so it is not copied/);
+  reflect(B);
+  assert.match(run(["open", "--input", join(slice, "index.md")]).err, refused);
+  assert.match(run(["open", "--input", slice]).err, refused);
+  const files = pushedFiles();
+  assert.ok(files.some((f) => f.endsWith("/notes.md")), "the rest of the trail is backed up");
+  assert.deepEqual(files.filter((f) => /index\.md|chunk-|MANIFEST|activity\.jsonl|to-slice|to-index/.test(f)), []);
+  assert.equal(run(["register", A, "--trail", dir]).code, 0, "the export folder itself is accepted");
+  assert.deepEqual(pushedFiles().filter((f) => /index\.md|chunk-|MANIFEST|activity\.jsonl/.test(f)), []);
+});
+
+test("a marked agent's reflect counts as fresh only with a window, in open with or without --threads", (t) => {
+  const { run, closeRound } = sandbox(t);
+  const env = { TZ: "UTC" };
+  const reflectA = (nowIso, window = []) => {
+    const dir = run(["reflect", A], nowIso, env).out.trim();
+    writeFileSync(join(dir, "synthesis.md"), "x\n");
+    assert.equal(run(["register", A, "--reflected", dir, ...window], nowIso, env).code, 0);
+  };
+  reflectA("2026-10-01T08:00:00Z");
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
+  const fresh = /steward is a long-running agent with no reflect of its new window; reflect it first, registering the window slice printed, then open the round/;
+  assert.match(run(["open"], "2026-10-16T09:00:00Z", env).err, fresh, "the default takes the windowless reflect as waiting and refuses it");
+  assert.match(run(["open", "--threads", A], "2026-10-16T09:00:00Z", env).err, fresh);
+  reflectA("2026-10-16T09:10:00Z", ["--from-seq", "0", "--to-seq", "9", "--through-at", "2026-10-16T09:00:00Z"]);
+  assert.equal(run(["open", "--threads", A], "2026-10-16T09:20:00Z", env).code, 0);
+  assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
+  assert.match(run(["open", "--threads", A], "2026-10-18T09:00:00Z", env).err, fresh, "after a closed round the refusal still says what to do next");
 });
