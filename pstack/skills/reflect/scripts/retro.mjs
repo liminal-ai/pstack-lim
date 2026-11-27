@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -639,7 +639,44 @@ function scanCommits(gitleaks, range) {
 function stageAll() {
   const exports = findExports(RETRO).map((p) => relative(RETRO, p));
   if (exports.length) git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...exports.map((p) => `:(literal)${p}`));
-  return git("add", "-A", "--force", "--", ".", ...NEVER_BACKED_UP.map((p) => `:(exclude,glob)**/${p}`), ...exports.map((p) => `:(exclude,literal)${p}`));
+  git("add", "-A", "--force", "--", ".", ...NEVER_BACKED_UP.map((p) => `:(exclude,glob)**/${p}`), ...exports.map((p) => `:(exclude,literal)${p}`));
+  // Every file passes here on its way to the backup, so transcript text is held back by what it is, wherever it was copied.
+  const transcript = git("ls-files", "-z").stdout.split("\0").filter((f) => f && isTranscript(join(RETRO, f)));
+  if (!transcript.length) return;
+  git("rm", "-q", "--cached", "--", ...transcript.map((f) => `:(literal)${f}`));
+  for (const f of transcript) console.error(`retro: ${join(RETRO, f)} is transcript text from a thread export or a slice, so it is not backed up`);
+}
+
+const SLICE_MARK = "<!-- retro.mjs slice output: transcript text, never backed up -->";
+
+function firstLine(path, limit) {
+  const fd = openSync(path, "r");
+  try {
+    const parts = [];
+    const buf = Buffer.alloc(65536);
+    for (let total = 0, n; total < limit && (n = readSync(fd, buf, 0, buf.length, total)) > 0; total += n) {
+      const end = buf.subarray(0, n).indexOf(10);
+      parts.push(Buffer.from(buf.subarray(0, end === -1 ? n : end)));
+      if (end !== -1) break;
+    }
+    return Buffer.concat(parts).toString("utf-8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// The export's rows always carry these fields: activity.jsonl and children/*.jsonl one shape, messages.jsonl another, children.json a list of subagent records.
+function isTranscript(path) {
+  try {
+    if (path.endsWith(".md")) return firstLine(path, 256) === SLICE_MARK;
+    if (path.endsWith(".json")) return /^\[\s*\{\s*"parent"\s*:\s*"[^"]*"\s*,\s*"id"\s*:/.test(firstLine(path, 256));
+    if (!path.endsWith(".jsonl")) return false;
+    const row = JSON.parse(firstLine(path, 1 << 26));
+    const has = (...keys) => keys.every((k) => k in row);
+    return (typeof row.seq === "number" && has("ordinal", "id", "type", "item")) || has("id", "role", "createdAt", "message");
+  } catch {
+    return false;
+  }
 }
 
 function backupFailed(state, step, r) {
@@ -810,7 +847,7 @@ function cmdOpen(args) {
       ? [...new Set(args.threads.split(",").map((s) => s.trim()).filter(Boolean))]
       : args.earlier
         ? []
-        : [...state.threads.values()].filter((t) => statusOf(t, state.rounds).kind === "waiting").map((t) => t.thread);
+        : [...state.threads.values()].filter((t) => statusOf(t, state.rounds).kind === "waiting" && (!t.longRunning?.active || freshReflects(t, state.rounds).length)).map((t) => t.thread);
   for (const id of ids) {
     const t = state.threads.get(id);
     if (!t) refuse(`thread ${id} is not registered; run register first`);
@@ -1018,17 +1055,37 @@ const utc = (date) => date.toISOString().replace(/\.\d{3}Z$/, "Z");
 const UNFINISHED = new Set(["idle", "pending", "running", "waiting"]);
 const unfinished = (row) => UNFINISHED.has(row.status ?? row.item?.status) || row.item?.streaming === true;
 
+const OUTPUT_TAIL = 600;
+
+const failed = (row) => (row.item?.exitCode ?? 0) !== 0 || row.item?.outputIndicatesFailure === true || (row.status ?? row.item?.status) === "failed";
+
+// A failed tool call keeps the end of its output, where the failure usually shows. Other tool calls stay one line.
+function failureTail(row) {
+  const output = row.item?.output;
+  if (output === undefined || output === null) return "";
+  const text = (typeof output === "string" ? output : JSON.stringify(output)).trim();
+  return text.length > OUTPUT_TAIL ? `[cut ${text.length - OUTPUT_TAIL} characters] ${text.slice(-OUTPUT_TAIL)}` : text;
+}
+
 function renderRow(row) {
-  const kind = SLICE_KINDS[sliceKind(row)];
+  const name = sliceKind(row);
+  const kind = SLICE_KINDS[name];
   if (!kind) return null;
   const text = cut(sliceText(row), kind.cap, kind.oneLine);
-  return `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+  const fail = name === "tool" && failed(row);
+  const line = `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}${fail ? ", failed" : ""}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+  const tail = fail ? failureTail(row) : "";
+  return tail ? `${line}\n${tail}` : line;
 }
 
 const epochName = (n) => (n === 0 ? "before the first compaction" : `after compaction ${n}`);
 const seqRange = (seqs) => (seqs.length === 1 ? `seq ${seqs[0]}` : `seq ${seqs[0]}–${seqs.at(-1)}`);
 
-function segmentIndex(seg) {
+const INDEX_LIST = 20;
+const seqList = (seqs) => (seqs.length > INDEX_LIST ? `${seqs.slice(0, INDEX_LIST).join(", ")} and ${seqs.length - INDEX_LIST} more` : seqs.join(", "));
+
+// Past INDEX_LIST of the person's messages in a day, the index gives their count and positions, and the chunks hold the text.
+function segmentIndex(seg, excerpts) {
   const of = (kind) => seg.rows.filter((r) => sliceKind(r) === kind);
   const person = of("person");
   const ticks = Object.entries(Object.groupBy(of("tick"), (r) => r.item.scheduledTaskId));
@@ -1036,12 +1093,12 @@ function segmentIndex(seg) {
   const errors = of("error");
   const interrupts = of("interrupt");
   const lines = [`### seq ${seg.rows[0].seq}–${seg.rows.at(-1).seq}, ${epochName(seg.epoch)} (${seg.rows.length} items)`, ""];
-  lines.push(`- From the person: ${person.length || "none"}`);
-  for (const r of person) lines.push(`  - seq ${r.seq}, ${utc(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
+  lines.push(`- From the person: ${person.length || "none"}${person.length && !excerpts ? `, ${seqRange(person.map((r) => r.seq))}` : ""}`);
+  if (excerpts) for (const r of person) lines.push(`  - seq ${r.seq}, ${utc(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
   for (const [task, rows] of ticks) lines.push(`- Scheduled ticks from \`${task}\`: ${rows.length}, ${seqRange(rows.map((r) => r.seq))}`);
   if (prompts.length) lines.push(`- From other threads or agents: ${prompts.length}, ${seqRange(prompts.map((r) => r.seq))}`);
-  if (errors.length) lines.push(`- Errors at seq ${errors.map((r) => r.seq).join(", ")}`);
-  if (interrupts.length) lines.push(`- Interrupts at seq ${interrupts.map((r) => r.seq).join(", ")}`);
+  if (errors.length) lines.push(`- Errors at seq ${seqList(errors.map((r) => r.seq))}`);
+  if (interrupts.length) lines.push(`- Interrupts at seq ${seqList(interrupts.map((r) => r.seq))}`);
   return [...lines, ""];
 }
 
@@ -1123,6 +1180,7 @@ function cmdSlice(args) {
   const chunkName = (i) => `chunks/chunk-${String(i + 1).padStart(2, "0")}.md`;
 
   const index = [
+    SLICE_MARK,
     `# Window seq ${from}–${to}`,
     "",
     `From \`${file}\`: ${window.length} items, ${utc(rowTime(rows[from]))} to ${throughAt}. Days and times are UTC.`,
@@ -1132,12 +1190,15 @@ function cmdSlice(args) {
     "",
     `Totals: ${count("person")} from the person, ${count("tick")} scheduled ticks, ${count("prompt")} from other threads or agents, ${count("compaction")} compactions, ${count("error")} errors, ${count("interrupt")} interrupts.`,
     "",
-    `The window renders to ${rendered} characters in ${chunks.length === 1 ? "one chunk" : `${chunks.length} chunks, split at day and compaction boundaries`}. Read the chunks, and read an item in activity.jsonl only to check a piece of evidence and the items around it:`,
+    `The window renders to ${rendered} characters in ${chunks.length === 1 ? "one chunk" : `${chunks.length} chunks, split at day and compaction boundaries, and within a day when one day is too large for a chunk`}. Read the chunks, and read an item in activity.jsonl only to check a piece of evidence and the items around it:`,
     "",
     ...chunks.map((c, i) => `- \`${chunkName(i)}\`: seq ${c.from}–${c.to}`),
-    ...(stillRunning.length ? ["", `Still running at export, so read as they were then: seq ${stillRunning.join(", ")}.`] : []),
+    ...(stillRunning.length ? ["", `Still running at export, so read as they were then: seq ${seqList(stillRunning)}.`] : []),
     "",
-    ...Object.entries(Object.groupBy(segments, (s) => s.day)).flatMap(([d, segs]) => [`## ${d}`, "", ...segs.flatMap(segmentIndex)]),
+    ...Object.entries(Object.groupBy(segments, (s) => s.day)).flatMap(([d, segs]) => {
+      const excerpts = segs.flatMap((seg) => seg.rows).filter((r) => sliceKind(r) === "person").length <= INDEX_LIST;
+      return [`## ${d}`, "", ...segs.flatMap((seg) => segmentIndex(seg, excerpts))];
+    }),
   ];
 
   const staged = `${out}.tmp-${process.pid}`;
@@ -1148,7 +1209,7 @@ function cmdSlice(args) {
   writeFileSync(join(staged, "index.md"), `${index.join("\n").trimEnd()}\n`);
   mkdirSync(join(staged, "chunks"));
   chunks.forEach((c, i) => {
-    const head = [`# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. It covers every item from seq ${c.from} to ${c.to}, but leaves out reasoning and checkpoints and cuts long text. Read the item at its seq in activity.jsonl for all of it.`, ""];
+    const head = [SLICE_MARK, `# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. It covers every item from seq ${c.from} to ${c.to}, but leaves out reasoning and checkpoints and cuts long text. Read the item at its seq in activity.jsonl for all of it.`, ""];
     writeFileSync(join(staged, chunkName(i)), `${[...head, ...c.parts].join("\n").trimEnd()}\n`);
   });
   rmSync(out, { recursive: true, force: true });

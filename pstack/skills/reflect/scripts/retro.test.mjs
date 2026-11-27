@@ -1384,7 +1384,7 @@ test("slice maps a small window by day and compaction, keeps the person apart fr
   assert.deepEqual(readdirSync(join(out, "chunks")), ["chunk-01.md"]);
   assert.match(readFileSync(join(out, "chunks", "chunk-01.md"), "utf-8"), /\[seq 9 08:00 person\] No, stop that\./);
   const index = readFileSync(join(out, "index.md"), "utf-8");
-  assert.match(index, /^# Window seq 0–10\n/);
+  assert.match(index, /^<!-- retro\.mjs slice output: transcript text, never backed up -->\n# Window seq 0–10\n/);
   assert.match(index, /Days and times are UTC\./);
   assert.match(index, /in one chunk\. Read the chunks, and read an item in activity\.jsonl only to check a piece of evidence and the items around it:\n\n- `chunks\/chunk-01\.md`: seq 0–10\n/);
   assert.doesNotMatch(index, /Still running/);
@@ -1456,7 +1456,7 @@ test("slice splits a large window into chunks at day and compaction boundaries t
   const texts = chunks.map((name) => readFileSync(join(out, "chunks", name), "utf-8"));
   texts.forEach((text, i) => {
     assert.ok(text.length < 300000 + 1000, `${chunks[i]} is ${text.length} characters`);
-    const [, from, to] = new RegExp(`^# Chunk \\d of ${chunks.length}: seq (\\d+)–(\\d+)\n`).exec(text);
+    const [, from, to] = new RegExp(`^<!-- retro\\.mjs slice output[^\n]*-->\n# Chunk \\d of ${chunks.length}: seq (\\d+)–(\\d+)\n`).exec(text);
     assert.ok(starts.includes(Number(from)), `${chunks[i]} starts at seq ${from}, a day or compaction boundary`);
     assert.match(text, new RegExp(`It covers every item from seq ${from} to ${to}`));
     covered.push([Number(from), Number(to)]);
@@ -1465,7 +1465,7 @@ test("slice splits a large window into chunks at day and compaction boundaries t
   assert.equal(covered[0][0], 0);
   assert.equal(covered.at(-1)[1], entries.length - 1);
   for (let i = 1; i < covered.length; i++) assert.equal(covered[i][0], covered[i - 1][1] + 1, "chunk ranges meet even where a left-out reasoning row sits at the edge");
-  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /in \d chunks, split at day and compaction boundaries\. Read the chunks[^\n]*\n\n- `chunks\/chunk-01\.md`: seq 0–/);
+  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /in \d chunks, split at day and compaction boundaries, and within a day when one day is too large for a chunk\. Read the chunks[^\n]*\n\n- `chunks\/chunk-01\.md`: seq 0–/);
   assert.equal(sliceRun(t, [dir]).code, 0);
   assert.deepEqual(readdirSync(join(out, "chunks")).sort().map((name) => readFileSync(join(out, "chunks", name), "utf-8")), texts, "a rerun writes the same chunks");
 });
@@ -1640,10 +1640,96 @@ test("a marked agent's reflect counts as fresh only with a window, in open with 
   reflectA("2026-10-01T08:00:00Z");
   run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
   const fresh = /steward is a long-running agent with no reflect of its new window; reflect it first, registering the window slice printed, then open the round/;
-  assert.match(run(["open"], "2026-10-16T09:00:00Z", env).err, fresh, "the default takes the windowless reflect as waiting and refuses it");
+  assert.match(run(["open"], "2026-10-16T09:00:00Z", env).err, /long-running agent steward is past the days allowed with no reflect of the new window/, "a windowless reflect is not selected");
   assert.match(run(["open", "--threads", A], "2026-10-16T09:00:00Z", env).err, fresh);
   reflectA("2026-10-16T09:10:00Z", ["--from-seq", "0", "--to-seq", "9", "--through-at", "2026-10-16T09:00:00Z"]);
   assert.equal(run(["open", "--threads", A], "2026-10-16T09:20:00Z", env).code, 0);
   assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
   assert.match(run(["open", "--threads", A], "2026-10-18T09:00:00Z", env).err, fresh, "after a closed round the refusal still says what to do next");
+});
+
+test("an old windowless reflect of a marked agent neither joins nor blocks a due round of settled threads", (t) => {
+  const { run, reflect } = sandbox(t);
+  const env = { TZ: "UTC" };
+  const dir = run(["reflect", A], "2026-10-01T08:00:00Z", env).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  run(["register", A, "--reflected", dir], "2026-10-01T08:00:00Z", env);
+  reflect(B, "2026-10-01T09:00:00Z");
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-08T09:00:00Z", env);
+  assert.match(run(["status"], "2026-10-09T10:00:00Z", env).out, /Round due: yes, 1 reflect waiting, oldest 8 days; long-running agents: 0 of 1 overdue/);
+  const opened = run(["open"], "2026-10-09T10:00:00Z", env);
+  assert.equal(opened.code, 0, opened.err);
+  assert.deepEqual(JSON.parse(readFileSync(join(opened.out.trim(), "round.json"), "utf-8")).threads, [B]);
+});
+
+test("a failed tool call shows as failed with the end of its output; a successful one stays one line", (t) => {
+  const dir = writeExport(join(scratchDir(t), "export"), [
+    ["command_execution", "2026-11-01T09:00:00Z", { input: "run-checks", output: `${"ok\n".repeat(400)}AssertionError: expected 3, got 2\n`, exitCode: 0, outputIndicatesFailure: true }],
+    ["command_execution", "2026-11-01T09:01:00Z", { input: "make", output: "error: missing target", exitCode: 2 }],
+    ["dynamic_tool", "2026-11-01T09:02:00Z", { toolName: "fetch", input: { url: "x" }, output: { error: "timed out" } }],
+    ["command_execution", "2026-11-01T09:03:00Z", { input: "git status", output: "secret-looking-but-fine output", exitCode: 0 }],
+  ]);
+  const rows = readFileSync(join(dir, "activity.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  rows[2].status = "failed";
+  writeFileSync(join(dir, "activity.jsonl"), `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  const chunk = readFileSync(join(dir, "slice-0-3", "chunks", "chunk-01.md"), "utf-8");
+  assert.match(chunk, /\[seq 0 09:00 command, exit 0, failed\] run-checks\n\[cut \d+ characters\] [\s\S]*AssertionError: expected 3, got 2\n/);
+  assert.ok(chunk.indexOf("[seq 1") - chunk.indexOf("[seq 0") < 700, "the output tail is bounded");
+  assert.match(chunk, /\[seq 1 09:01 command, exit 2, failed\] make\nerror: missing target\n/);
+  assert.match(chunk, /\[seq 2 09:02 tool fetch, failed\] \{"url":"x"\}\n\{"error":"timed out"\}\n/);
+  assert.match(chunk, /\[seq 3 09:03 command, exit 0\] git status\n?$/);
+});
+
+test("index.md lists the person's messages one by one only up to twenty a day, and keeps each excerpt short", (t) => {
+  const entries = [];
+  for (let i = 0; i < 25; i++) entries.push(person(`2026-11-01T09:${String(i).padStart(2, "0")}:00Z`, `busy day message ${i} ${"z".repeat(500)}`));
+  for (let i = 0; i < 3; i++) entries.push(person(`2026-11-02T09:0${i}:00Z`, `quiet day message ${i}`));
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  const index = readFileSync(join(dir, "slice-0-27", "index.md"), "utf-8");
+  assert.match(index, /## 2026-11-01\n\n### seq 0–24, before the first compaction \(25 items\)\n\n- From the person: 25, seq 0–24\n\n/);
+  assert.doesNotMatch(index, /busy day message/);
+  assert.match(index, /  - seq 25, 09:00: quiet day message 0\n/);
+  for (const line of index.split("\n")) assert.ok(line.length < 400, `a line of ${line.length} characters`);
+});
+
+test("the backup holds back export and slice files by what they are, wherever they were copied, and keeps ordinary files", (t) => {
+  const { store, run, reflect } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const exportDir = smallExport(t);
+  mkdirSync(join(exportDir, "children"));
+  writeFileSync(join(exportDir, "children", "child.jsonl"), readFileSync(join(exportDir, "activity.jsonl")));
+  writeFileSync(join(exportDir, "messages.jsonl"), `${JSON.stringify({ id: "m1", role: "user", createdAt: "2026-11-01T09:00:00Z", message: { text: "Please set up the nightly job." } })}\n`);
+  writeFileSync(join(exportDir, "children.json"), JSON.stringify([{ parent: A, id: "s1", childThreadId: "c1", status: "completed", record: { prompt: "Please set up the nightly job." } }]));
+  assert.equal(run(["slice", exportDir], undefined, { TZ: "UTC" }).code, 0);
+
+  const evidence = join(scratchDir(t), "evidence");
+  mkdirSync(evidence);
+  for (const f of ["activity.jsonl", "messages.jsonl", "children.json"]) cpSync(join(exportDir, f), join(evidence, f));
+  cpSync(join(exportDir, "children", "child.jsonl"), join(evidence, "child.jsonl"));
+  cpSync(join(exportDir, "slice-0-10", "index.md"), join(evidence, "index.md"));
+  cpSync(join(exportDir, "slice-0-10", "chunks", "chunk-01.md"), join(evidence, "chunk-01.md"));
+  writeFileSync(join(evidence, "events.jsonl"), `${JSON.stringify({ ts: 1, event: "deploy" })}\n`);
+  writeFileSync(join(evidence, "notes.md"), "# Notes\n");
+  const docs = join(scratchDir(t), "docs");
+  mkdirSync(docs);
+  writeFileSync(join(docs, "index.md"), "# An ordinary index\n");
+  const linked = join(scratchDir(t), "linked");
+  mkdirSync(linked);
+  symlinkSync(join(evidence, "activity.jsonl"), join(linked, "detached.jsonl"));
+  const loose = join(scratchDir(t), "messages.jsonl");
+  cpSync(join(exportDir, "messages.jsonl"), loose);
+
+  const trail = run(["register", A, "--trail", evidence, "--trail", linked, "--trail", loose, "--trail", docs]);
+  assert.equal(trail.code, 0, trail.err);
+  assert.match(trail.err, /activity\.jsonl is transcript text from a thread export or a slice, so it is not backed up/);
+  reflect(B);
+  const opened = run(["open", "--input", evidence]);
+  assert.equal(opened.code, 0, opened.err);
+  const files = pushedFiles();
+  for (const keep of ["events.jsonl", "notes.md", `${A}/thread.json`]) assert.ok(files.some((f) => f.endsWith(keep)), `${keep} is backed up`);
+  assert.ok(files.some((f) => f.endsWith("/index.md") && f.includes("docs")), "an ordinary index.md is backed up");
+  const leaked = files.filter((f) => /activity\.jsonl|messages\.jsonl|children\.json|child\.jsonl|detached\.jsonl|chunk-01\.md/.test(f) || (f.endsWith("index.md") && !f.includes("docs")));
+  assert.deepEqual(leaked, []);
 });
