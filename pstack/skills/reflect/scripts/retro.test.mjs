@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1246,4 +1246,506 @@ test("a scan that neither passes cleanly nor reports findings blocks the push", 
     assert.match(r.err, /possible secret in .* \(gitleaks did not finish: /, what);
     assert.deepEqual(pushed(), [], what);
   }
+});
+
+test("register marks a long-running agent on its thread.json, updates it, and unmarks it", (t) => {
+  const { run, record } = sandbox(t);
+  const UTC = { TZ: "UTC" };
+  assert.match(run(["register", A, "--long-running"]).err, /--long-running needs --host/);
+  assert.match(run(["register", A, "--host", "box"]).err, /--host goes with --long-running/);
+  assert.match(run(["register", A, "--long-running", "--no-long-running", "--host", "box"]).err, /not both/);
+  assert.match(run(["register", A, "--long-running", "--host", "box", "--days-allowed", "0"]).err, /at least 1/);
+  assert.match(run(["register", A, "--long-running", "--host", "box", "--days-allowed", "two"]).err, /whole number/);
+  assert.equal(run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-11-01T09:00:00Z", UTC).code, 0);
+  assert.deepEqual(record(A).longRunning, { active: true, host: "box", limbaseThread: null, daysAllowed: 14, markedAt: "2026-11-01T09:00:00+00:00" });
+  assert.equal(run(["register", A, "--long-running", "--limbase-thread", "th_1", "--days-allowed", "7"], "2026-11-02T09:00:00Z", UTC).code, 0);
+  assert.deepEqual(record(A).longRunning, { active: true, host: "box", limbaseThread: "th_1", daysAllowed: 7, markedAt: "2026-11-01T09:00:00+00:00" }, "marking again keeps what it does not name");
+  assert.equal(run(["register", A, "--no-long-running"], "2026-11-03T09:00:00Z", UTC).code, 0);
+  assert.equal(record(A).longRunning.active, false);
+  assert.match(run(["status"], "2026-11-03T09:00:00Z").out, /## Long-running agents\n\nNone\./);
+  assert.equal(run(["register", A, "--long-running", "--host", "other"], "2026-11-05T09:00:00Z", UTC).code, 0);
+  assert.deepEqual(record(A).longRunning, { active: true, host: "other", limbaseThread: null, daysAllowed: 14, markedAt: "2026-11-05T09:00:00+00:00" }, "marking after an unmark starts over");
+});
+
+test("a long-running agent past its days allowed makes a round due with no reflects waiting, and every message reports both groups", (t) => {
+  const { run } = sandbox(t);
+  const env = { TZ: "UTC" };
+  run(["register", A, "--title", "steward", "--project", "limbase", "--long-running", "--host", "box", "--limbase-thread", "th_1"], "2026-11-01T09:00:00Z", env);
+  const before = run(["status"], "2026-11-14T09:00:00Z", env).out;
+  assert.match(before, /Round due: no, no reflects waiting; long-running agents: 0 of 1 overdue \(steward: last retro never, marked 13 days ago, 14 allowed\)/);
+  assert.match(before, /## Long-running agents\n\n\| thread \| project \| host \| Limbase thread \| last retro \| days since \| days allowed \| last position covered \|\n[^\n]*\n\| \[steward\]\([^)]*\) \| limbase \| box \| th_1 \| never \| 13 \| 14 \| none \|/);
+  assert.match(run(["remind"], "2026-11-14T09:00:00Z", env).out, /^QUIET: no reflects waiting; long-running agents: 0 of 1 overdue/);
+  assert.match(run(["status"], "2026-11-15T09:00:00Z", env).out, /\| never \| 14, overdue \| 14 \|/);
+  assert.match(run(["remind"], "2026-11-15T09:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue \(steward: last retro never, marked 14 days ago, 14 allowed\)/);
+  assert.match(run(["remind"], "2026-11-15T10:00:00Z", env).out, /^QUIET: asked or answered within 20 hours; no reflects waiting; long-running agents: 1 of 1 overdue/);
+});
+
+test("settled threads still make a round due on their own, and the message names the long-running agents too", (t) => {
+  const { run, reflect } = sandbox(t);
+  run(["register", C, "--title", "steward", "--long-running", "--host", "box"]);
+  reflect(A);
+  reflect(B);
+  reflect(B);
+  assert.match(run(["remind"]).out, /^ASK: 3 reflects waiting, oldest 0 days; long-running agents: 0 of 1 overdue \(steward: last retro never, marked 0 days ago, 14 allowed\)/);
+});
+
+test("a reflect's window needs --reflected and all three values, and a retry sets it on the same reflect", (t) => {
+  const { run, record } = sandbox(t);
+  const dir = run(["reflect", A]).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  assert.match(run(["register", A, "--from-seq", "0", "--to-seq", "9", "--through-at", "2026-11-01T09:00:00Z"]).err, /pass it with --reflected/);
+  assert.match(run(["register", A, "--reflected", dir, "--from-seq", "0"]).err, /together/);
+  assert.match(run(["register", A, "--reflected", dir, "--from-seq", "9", "--to-seq", "3", "--through-at", "2026-11-01T09:00:00Z"]).err, /before --from-seq/);
+  assert.match(run(["register", A, "--reflected", dir, "--from-seq", "0", "--to-seq", "9", "--through-at", "soon"]).err, /ISO time/);
+  assert.equal(record(A).reflects.length, 0, "a refused window registers no reflect");
+  assert.equal(run(["register", A, "--reflected", dir]).code, 0);
+  assert.equal(run(["register", A, "--reflected", dir, "--from-seq", "0", "--to-seq", "9", "--through-at", "2026-11-01T09:00:00Z"], undefined, { TZ: "UTC" }).code, 0);
+  assert.equal(record(A).reflects.length, 1);
+  assert.deepEqual(record(A).reflects[0].window, { fromSeq: 0, toSeq: 9, throughAt: "2026-11-01T09:00:00+00:00" });
+});
+
+test("two reflects over two windows in two rounds: the last retro is the later closed round and the position is the later window's end", (t) => {
+  const { run, closeRound, record } = sandbox(t);
+  const env = { TZ: "UTC" };
+  const reflectWindow = (nowIso, from, to, through) => {
+    const dir = run(["reflect", A], nowIso, env).out.trim();
+    writeFileSync(join(dir, "synthesis.md"), "x\n");
+    const r = run(["register", A, "--reflected", dir, "--from-seq", String(from), "--to-seq", String(to), "--through-at", through], nowIso, env);
+    assert.equal(r.code, 0, r.err);
+  };
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
+  reflectWindow("2026-10-10T09:00:00Z", 0, 99, "2026-10-10T08:00:00Z");
+  assert.equal(run(["open"], "2026-10-10T10:00:00Z", env).code, 0);
+  assert.match(run(["status"], "2026-10-20T11:00:00Z", env).out, /Round due: yes, round 2026-10-10 has been open 10 days; finish and close it; long-running agents: 1 of 1 overdue/);
+  assert.equal(closeRound("2026-10-10", "2026-10-11T09:00:00Z").code, 0);
+  assert.match(run(["status"], "2026-10-12T09:00:00Z", env).out, /\| 2026-10-11 \| 1 \| 14 \| seq 99, through 2026-10-10T08:00:00\+00:00 \|/);
+
+  reflectWindow("2026-10-24T09:00:00Z", 100, 250, "2026-10-24T08:00:00Z");
+  const waiting = run(["status"], "2026-10-25T09:00:00Z", env).out;
+  assert.match(waiting, /Round due: yes, no reflects waiting; long-running agents: 1 of 1 overdue \(steward: last retro 2026-10-11, 14 days ago, 14 allowed\)/);
+  assert.match(waiting, /\| 2026-10-11 \| 14, overdue \| 14 \| seq 250, through 2026-10-24T08:00:00\+00:00 \|/);
+  assert.match(run(["remind"], "2026-10-25T09:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
+  assert.equal(run(["open"], "2026-10-25T10:00:00Z", env).code, 0);
+  assert.match(run(["status"], "2026-10-26T09:00:00Z", env).out, /Round due: no, round 2026-10-25 has been open 0 days; long-running agents: 1 of 1 overdue/, "an open round holds back a second ask");
+  assert.equal(closeRound("2026-10-25", "2026-10-26T09:00:00Z").code, 0);
+  const after = run(["status"], "2026-10-27T09:00:00Z", env).out;
+  assert.match(after, /Round due: no, no reflects waiting; long-running agents: 0 of 1 overdue \(steward: last retro 2026-10-26, 1 day ago, 14 allowed\)/);
+  assert.match(after, /\| 2026-10-26 \| 1 \| 14 \| seq 250, through 2026-10-24T08:00:00\+00:00 \|/);
+  assert.deepEqual(record(A).reflects.map((c) => c.window.toSeq), [99, 250]);
+});
+
+const TICK = "scheduled-task:00000000-0000-4000-8000-00000000000a";
+const OTHER = "11111111-0000-4000-8000-000000000011";
+
+function writeExport(dir, entries) {
+  mkdirSync(dir, { recursive: true });
+  const lines = entries.map(([type, at, item], seq) => JSON.stringify({ seq, ordinal: seq + 1, id: `item-${seq}`, type, status: "completed", updatedAt: at, item: { type, startedAt: at, updatedAt: at, ...item } }));
+  writeFileSync(join(dir, "activity.jsonl"), `${lines.join("\n")}\n`);
+  writeFileSync(join(dir, "MANIFEST.json"), JSON.stringify({ thread: A, exportedAt: "2026-11-03T00:00:00Z" }));
+  return dir;
+}
+
+const person = (at, text) => ["user_message", at, { createdBy: "user", creationSource: "web", text }];
+const tick = (at) => ["user_message", at, { createdBy: "agent", creationSource: "mcp", scheduledTaskId: TICK, text: "Run the 55-minute check." }];
+const fromThread = (at, text) => ["user_message", at, { createdBy: "agent", creationSource: "mcp", senderThreadId: OTHER, text }];
+const agent = (at, text) => ["assistant_message", at, { text, streaming: false }];
+const command = (at) => ["command_execution", at, { input: "git status", output: "clean", exitCode: 0 }];
+const compaction = (at) => ["compaction", at, { driver: "claudeAgent", beforeTokenCount: 900000, afterTokenCount: 40000 }];
+
+const running = (at, text) => ["assistant_message", at, { text, streaming: true }];
+const reasoning = (at) => ["reasoning", at, { text: "thinking", streaming: false }];
+
+function sliceRun(t, args, tz = "UTC") {
+  const { run } = sandbox(t);
+  return run(["slice", ...args], undefined, { TZ: tz });
+}
+
+const smallExport = (t) =>
+  writeExport(join(scratchDir(t), "export"), [
+    person("2026-11-01T09:00:00Z", "Please set up the nightly job."),
+    agent("2026-11-01T09:01:00Z", "Done."),
+    reasoning("2026-11-01T09:01:30Z"),
+    command("2026-11-01T09:02:00Z"),
+    tick("2026-11-01T10:00:00Z"),
+    tick("2026-11-01T11:00:00Z"),
+    compaction("2026-11-01T12:00:00Z"),
+    fromThread("2026-11-01T12:30:00Z", "Child finished."),
+    ["error", "2026-11-01T12:40:00Z", { failure: { class: "provider", message: "rate limited", code: null, retryable: true } }],
+    person("2026-11-02T08:00:00Z", "No, stop that. Ask me before you restart services."),
+    tick("2026-11-02T09:00:00Z"),
+  ]);
+
+test("slice maps a small window by day and compaction, keeps the person apart from scheduled ticks, and writes a small window as one chunk", (t) => {
+  const dir = smallExport(t);
+  const r = sliceRun(t, [dir]);
+  assert.equal(r.code, 0, r.err);
+  const out = join(dir, "slice-0-10");
+  assert.equal(r.out, `${out}\nwindow: --from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z; 1 chunk\n`);
+  assert.deepEqual(readdirSync(join(out, "chunks")), ["chunk-01.md"]);
+  assert.match(readFileSync(join(out, "chunks", "chunk-01.md"), "utf-8"), /\[seq 9 08:00 person\] No, stop that\./);
+  const index = readFileSync(join(out, "index.md"), "utf-8");
+  assert.match(index, /^<!-- retro\.mjs slice output: transcript text, never backed up -->\n# Window seq 0–10\n/);
+  assert.match(index, /Days and times are UTC\./);
+  assert.match(index, /in one chunk\. Read the chunks, and read an item in activity\.jsonl only to check a piece of evidence and the items around it:\n\n- `chunks\/chunk-01\.md`: seq 0–10\n/);
+  assert.doesNotMatch(index, /Still running/);
+  assert.match(index, /Register the reflect over it with `--from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z`/);
+  assert.match(index, /Totals: 2 from the person, 3 scheduled ticks, 1 from other threads or agents, 1 compactions, 1 errors, 0 interrupts\./);
+  assert.match(index, /## 2026-11-01\n\n### seq 0–5, before the first compaction \(6 items\)\n\n- From the person: 1\n  - seq 0, 09:00: Please set up the nightly job\.\n- Scheduled ticks from `scheduled-task:[^`]+`: 2, seq 4–5\n/);
+  assert.match(index, /### seq 6–8, after compaction 1 \(3 items\)\n\n- From the person: none\n- From other threads or agents: 1, seq 7\n- Errors at seq 8\n/);
+  assert.match(index, /## 2026-11-02\n\n### seq 9–10, after compaction 1 \(2 items\)\n\n- From the person: 1\n  - seq 9, 08:00: No, stop that\. Ask me before you restart services\.\n- Scheduled ticks from `[^`]+`: 1, seq 10\n/);
+});
+
+test("slice writes the same files whatever the machine's timezone", (t) => {
+  const dir = smallExport(t);
+  assert.equal(sliceRun(t, [dir], "Pacific/Kiritimati").code, 0);
+  const east = readFileSync(join(dir, "slice-0-10", "index.md"), "utf-8");
+  assert.equal(sliceRun(t, [dir], "America/Los_Angeles").code, 0);
+  assert.equal(readFileSync(join(dir, "slice-0-10", "index.md"), "utf-8"), east);
+});
+
+test("slice of a later window numbers compactions from the start of the export, and an empty or reversed window has nothing new", (t) => {
+  const dir = writeExport(join(scratchDir(t), "export"), [person("2026-11-01T09:00:00Z", "a"), compaction("2026-11-01T10:00:00Z"), compaction("2026-11-01T11:00:00Z"), person("2026-11-01T12:00:00Z", "b"), agent("2026-11-01T12:01:00Z", "c")]);
+  const r = sliceRun(t, [dir, "--from-seq", "3"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(readFileSync(join(dir, "slice-3-4", "index.md"), "utf-8"), /### seq 3–4, after compaction 2 \(2 items\)/);
+  assert.match(sliceRun(t, [dir, "--to-seq", "5"]).err, /past the export's last item, seq 4/);
+  assert.match(sliceRun(t, [dir, "--from-seq", "5"]).err, /nothing new to reflect from seq 5: the window ends at seq 4\. Nothing is new since the last reflect, so stop here/);
+  assert.match(sliceRun(t, [dir, "--from-seq", "4", "--to-seq", "3"]).err, /nothing new to reflect from seq 4/);
+});
+
+test("slice ends the window before the items still running at its end, and says where the next window starts", (t) => {
+  const dir = writeExport(join(scratchDir(t), "export"), [
+    person("2026-11-01T09:00:00Z", "a"),
+    ["todo_list", "2026-11-01T09:00:10Z", { steps: [] }],
+    agent("2026-11-01T09:01:00Z", "b"),
+    running("2026-11-01T09:02:00Z", "half a reply"),
+    command("2026-11-01T09:03:00Z"),
+  ]);
+  const rows = readFileSync(join(dir, "activity.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  rows[1].status = "running";
+  rows[4].status = "running";
+  writeFileSync(join(dir, "activity.jsonl"), `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`);
+  const r = sliceRun(t, [dir]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /window: --from-seq 0 --to-seq 2 --through-at 2026-11-01T09:01:00Z; seq 3–4 still running, left for the next window; 1 chunk\n$/, "an unfinished item before a finished one stays in the window");
+  const index = readFileSync(join(dir, "slice-0-2", "index.md"), "utf-8");
+  assert.match(index, /Seq 3–4 were still running at export, so this window ends at seq 2 and the next one starts with them\./);
+  assert.match(index, /Still running at export, so read as they were then: seq 1\./);
+  const chunk = readFileSync(join(dir, "slice-0-2", "chunks", "chunk-01.md"), "utf-8");
+  assert.match(chunk, /\[seq 1 09:00 todo list, still running at export\]/, "the chunk alone shows the item was unfinished");
+  assert.match(chunk, /\[seq 2 09:01 agent\] b/);
+  assert.match(sliceRun(t, [dir, "--from-seq", "3"]).err, /nothing new to reflect from seq 3: seq 3–4 are still running/);
+});
+
+test("slice splits a large window into chunks at day and compaction boundaries that cover every seq, the same way every time", (t) => {
+  const long = (n) => `${"word ".repeat(15000)}${n}`;
+  const entries = [];
+  const starts = [];
+  for (const [d, hasCompaction] of [["2026-11-01", false], ["2026-11-02", true], ["2026-11-03", false], ["2026-11-04", true]]) {
+    starts.push(entries.length);
+    entries.push(reasoning(`${d}T07:00:00Z`));
+    if (hasCompaction) starts.push(entries.push(compaction(`${d}T08:00:00Z`)) - 1);
+    for (let i = 0; i < 2; i++) entries.push(person(`${d}T09:0${i}:00Z`, long(i)), agent(`${d}T09:0${i}:30Z`, long(i)), command(`${d}T09:0${i}:40Z`), tick(`${d}T09:0${i}:50Z`));
+    entries.push(reasoning(`${d}T10:00:00Z`));
+  }
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  const out = join(dir, `slice-0-${entries.length - 1}`);
+  const first = sliceRun(t, [dir]);
+  assert.equal(first.code, 0, first.err);
+  const chunks = readdirSync(join(out, "chunks")).sort();
+  assert.ok(chunks.length >= 2, `${chunks.length} chunks`);
+  assert.match(first.out, new RegExp(`; ${chunks.length} chunks\n$`));
+  const covered = [];
+  const texts = chunks.map((name) => readFileSync(join(out, "chunks", name), "utf-8"));
+  texts.forEach((text, i) => {
+    assert.ok(text.length < 300000 + 1000, `${chunks[i]} is ${text.length} characters`);
+    const [, from, to] = new RegExp(`^<!-- retro\\.mjs slice output[^\n]*-->\n# Chunk \\d of ${chunks.length}: seq (\\d+)–(\\d+)\n`).exec(text);
+    assert.ok(starts.includes(Number(from)), `${chunks[i]} starts at seq ${from}, a day or compaction boundary`);
+    assert.match(text, new RegExp(`It covers every item from seq ${from} to ${to}`));
+    covered.push([Number(from), Number(to)]);
+    assert.doesNotMatch(text, /\[seq \d+ [\d:]+ agent\]\n(word ){15001}/, "long text is cut");
+  });
+  assert.equal(covered[0][0], 0);
+  assert.equal(covered.at(-1)[1], entries.length - 1);
+  for (let i = 1; i < covered.length; i++) assert.equal(covered[i][0], covered[i - 1][1] + 1, "chunk ranges meet even where a left-out reasoning row sits at the edge");
+  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /in \d chunks, split at day and compaction boundaries, and within a day when one day is too large for a chunk\. Read the chunks[^\n]*\n\n- `chunks\/chunk-01\.md`: seq 0–/);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  assert.deepEqual(readdirSync(join(out, "chunks")).sort().map((name) => readFileSync(join(out, "chunks", name), "utf-8")), texts, "a rerun writes the same chunks");
+});
+
+test("slice splits one day too big for a chunk between items", (t) => {
+  const entries = Array.from({ length: 20 }, (_, i) => agent(`2026-11-01T09:${String(i).padStart(2, "0")}:00Z`, "x".repeat(30000)));
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  const names = readdirSync(join(dir, "slice-0-19", "chunks")).sort();
+  assert.equal(names.length, 2);
+  for (const name of names) {
+    const text = readFileSync(join(dir, "slice-0-19", "chunks", name), "utf-8");
+    assert.ok(text.length < 300000 + 1000, `${name} is ${text.length} characters`);
+    assert.match(text, /## 2026-11-01, before the first compaction\n/);
+  }
+});
+
+test("slice reads only an export folder, takes no --out, and writes inside the real export through a symlink", (t) => {
+  const plain = join(scratchDir(t), "plain");
+  mkdirSync(plain);
+  writeFileSync(join(plain, "activity.jsonl"), readFileSync(join(smallExport(t), "activity.jsonl")));
+  assert.match(sliceRun(t, [plain]).err, /is not an export folder with a MANIFEST\.json/);
+  const dir = smallExport(t);
+  assert.match(sliceRun(t, [join(dir, "activity.jsonl")]).err, /is not an export folder/);
+  assert.match(sliceRun(t, [dir, "--out", join(scratchDir(t), "elsewhere")]).err, /unknown option --out/);
+  const link = join(scratchDir(t), "link");
+  symlinkSync(dir, link);
+  const r = sliceRun(t, [link]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out.split("\n")[0], join(realpathSync(dir), "slice-0-10"));
+  assert.ok(!existsSync(join(link, "..", "slice-0-10")));
+});
+
+test("a rerun replaces only its own slice folder", (t) => {
+  const dir = smallExport(t);
+  mkdirSync(join(dir, "slice-0-10", "chunks"), { recursive: true });
+  writeFileSync(join(dir, "slice-0-10", "chunks", "stale.md"), "old\n");
+  mkdirSync(join(dir, "slice-0-9"));
+  writeFileSync(join(dir, "slice-0-9", "index.md"), "another window\n");
+  writeFileSync(join(dir, "notes.md"), "mine\n");
+  const before = readFileSync(join(dir, "activity.jsonl"), "utf-8");
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  assert.deepEqual(readdirSync(join(dir, "slice-0-10")).sort(), ["MANIFEST.json", "chunks", "index.md"]);
+  assert.deepEqual(readdirSync(join(dir, "slice-0-10", "chunks")), ["chunk-01.md"]);
+  assert.equal(readFileSync(join(dir, "slice-0-9", "index.md"), "utf-8"), "another window\n");
+  assert.equal(readFileSync(join(dir, "notes.md"), "utf-8"), "mine\n");
+  assert.equal(readFileSync(join(dir, "activity.jsonl"), "utf-8"), before);
+  assert.ok(existsSync(join(dir, "MANIFEST.json")));
+});
+
+test("a slice never reaches the backup, whether sliced before the export is registered or after", (t) => {
+  const { store, run, record, inRetro } = sandbox(t);
+  const { pushed, pushedFiles } = backedUp(t, store);
+  const outside = smallExport(t);
+  assert.equal(run(["slice", outside], undefined, { TZ: "UTC" }).code, 0);
+  assert.equal(run(["register", A, "--trail", outside]).code, 0);
+  const copy = inRetro(record(A).trails[0].path);
+  assert.ok(existsSync(join(copy, "slice-0-10", "index.md")), "the copied trail holds the slice");
+  assert.equal(run(["slice", copy, "--from-seq", "9"], undefined, { TZ: "UTC" }).code, 0);
+  assert.equal(run(["register", A, "--title", "steward"]).code, 0);
+  assert.ok(pushed().length >= 2);
+  const files = pushedFiles();
+  assert.ok(files.includes(`${A}/thread.json`));
+  assert.deepEqual(files.filter((f) => /slice-|activity\.jsonl|MANIFEST\.json/.test(f)), []);
+});
+
+test("a long-running agent's own waiting reflect does not trip the settled-thread rules; only its days allowed does", (t) => {
+  const { run } = sandbox(t);
+  const env = { TZ: "UTC" };
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box", "--days-allowed", "30"], "2026-10-01T09:00:00Z", env);
+  for (let i = 0; i < 3; i++) {
+    const dir = run(["reflect", A], "2026-10-01T10:00:00Z", env).out.trim();
+    writeFileSync(join(dir, "synthesis.md"), "x\n");
+    run(["register", A, "--reflected", dir], "2026-10-01T10:00:00Z", env);
+  }
+  assert.match(run(["status"], "2026-10-09T10:00:00Z", env).out, /Round due: no, no reflects waiting; long-running agents: 0 of 1 overdue/, "three reflects a week old");
+  assert.match(run(["remind"], "2026-10-31T10:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
+});
+
+test("an overdue long-running agent joins a round only after a fresh reflect, with or without --threads", (t) => {
+  const { run, reflect, closeRound } = sandbox(t);
+  const env = { TZ: "UTC" };
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
+  assert.match(run(["remind"], "2026-10-16T09:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
+  assert.match(run(["open"], "2026-10-16T09:10:00Z", env).err, /long-running agent steward is past the days allowed with no reflect of the new window; reflect it first, then open the round/);
+  assert.match(run(["open", "--threads", A], "2026-10-16T09:10:00Z", env).err, /steward is a long-running agent with no reflect of its new window; reflect it first/);
+  reflect(B, "2026-10-16T09:20:00Z");
+  assert.match(run(["open"], "2026-10-16T09:30:00Z", env).err, /reflect it first, then open the round, or name the threads to include with --threads/, "a waiting settled thread does not let the default leave the agent out");
+  assert.match(run(["status"], "2026-10-16T09:30:00Z", env).out, /## Rounds\n\nNone\./, "a refused open leaves no round");
+  const dir = run(["reflect", A], "2026-10-16T09:40:00Z", env).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  assert.equal(run(["register", A, "--reflected", dir, "--from-seq", "0", "--to-seq", "40", "--through-at", "2026-10-16T09:00:00Z"], "2026-10-16T09:40:00Z", env).code, 0);
+  const opened = run(["open"], "2026-10-16T10:00:00Z", env);
+  assert.equal(opened.code, 0, opened.err);
+  const round = JSON.parse(readFileSync(join(opened.out.trim(), "round.json"), "utf-8"));
+  assert.deepEqual(round.threads.sort(), [A, B].sort());
+  assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
+  assert.match(run(["status"], "2026-10-18T09:00:00Z", env).out, /long-running agents: 0 of 1 overdue \(steward: last retro 2026-10-17, 1 day ago, 14 allowed\)/);
+});
+
+test("a large export with little conversation is still read from its rendered chunk, never from the raw window", (t) => {
+  const entries = Array.from({ length: 300 }, (_, i) => ["command_execution", `2026-11-01T09:${String(i % 60).padStart(2, "0")}:00Z`, { input: "cat big.log", output: "y".repeat(10000), exitCode: 0 }]);
+  entries.unshift(person("2026-11-01T08:00:00Z", "Look at the log."));
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  assert.ok(readFileSync(join(dir, "activity.jsonl")).length > 3000000);
+  const r = sliceRun(t, [dir]);
+  assert.match(r.out, /; 1 chunk\n$/);
+  const chunk = readFileSync(join(dir, "slice-0-300", "chunks", "chunk-01.md"), "utf-8");
+  assert.ok(chunk.length < 100000, `the chunk is ${chunk.length} characters`);
+  assert.doesNotMatch(readFileSync(join(dir, "slice-0-300", "index.md"), "utf-8"), /lines with seq/);
+});
+
+test("a slice carries an export's marker, so the backup leaves it out wherever it is copied", (t) => {
+  const { store, run } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const dir = smallExport(t);
+  assert.equal(run(["slice", dir], undefined, { TZ: "UTC" }).code, 0);
+  const slice = join(dir, "slice-0-10");
+  assert.deepEqual(JSON.parse(readFileSync(join(slice, "MANIFEST.json"), "utf-8")), { thread: A, exportedAt: "2026-11-03T00:00:00Z", slice: { fromSeq: 0, toSeq: 10 } });
+  const loose = join(scratchDir(t), "loose-slice");
+  cpSync(slice, loose, { recursive: true });
+  const trail = join(scratchDir(t), "run-folder");
+  mkdirSync(trail);
+  writeFileSync(join(trail, "notes.md"), "notes\n");
+  cpSync(slice, join(trail, "copied-slice"), { recursive: true });
+  assert.equal(run(["register", A, "--trail", trail]).code, 0);
+  const files = pushedFiles();
+  assert.ok(files.some((f) => f.endsWith("/notes.md")));
+  assert.deepEqual(files.filter((f) => /index\.md|chunk-|MANIFEST/.test(f)), []);
+  assert.match(run(["register", A, "--trail", loose]).err, /is part of a thread export or a slice of one/, "a slice on its own is refused");
+});
+
+test("register and open refuse part of an export or a slice, and a trail's link into one is not copied, all through the real backup", (t) => {
+  const { store, run, reflect } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const dir = smallExport(t);
+  assert.equal(run(["slice", dir], undefined, { TZ: "UTC" }).code, 0);
+  const slice = join(dir, "slice-0-10");
+  const refused = /is part of a thread export or a slice of one, which must never be backed up; pass the export folder itself/;
+  assert.match(run(["register", A, "--trail", slice]).err, refused);
+  assert.match(run(["register", A, "--trail", join(slice, "index.md")]).err, refused);
+  assert.match(run(["register", A, "--trail", join(dir, "activity.jsonl")]).err, refused);
+  const loose = join(scratchDir(t), "activity.jsonl");
+  cpSync(join(dir, "activity.jsonl"), loose);
+  assert.match(run(["register", A, "--trail", loose]).err, refused, "an activity.jsonl taken out of its export");
+  const linked = join(scratchDir(t), "linked");
+  mkdirSync(linked);
+  writeFileSync(join(linked, "notes.md"), "notes\n");
+  symlinkSync(slice, join(linked, "to-slice"));
+  symlinkSync(join(slice, "index.md"), join(linked, "to-index.md"));
+  const r = run(["register", A, "--trail", linked]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /links into a thread export or a slice, so it is not copied/);
+  reflect(B);
+  assert.match(run(["open", "--input", join(slice, "index.md")]).err, refused);
+  assert.match(run(["open", "--input", slice]).err, refused);
+  const files = pushedFiles();
+  assert.ok(files.some((f) => f.endsWith("/notes.md")), "the rest of the trail is backed up");
+  assert.deepEqual(files.filter((f) => /index\.md|chunk-|MANIFEST|activity\.jsonl|to-slice|to-index/.test(f)), []);
+  assert.equal(run(["register", A, "--trail", dir]).code, 0, "the export folder itself is accepted");
+  assert.deepEqual(pushedFiles().filter((f) => /index\.md|chunk-|MANIFEST|activity\.jsonl/.test(f)), []);
+});
+
+test("a marked agent's reflect counts as fresh only with a window, in open with or without --threads", (t) => {
+  const { run, closeRound } = sandbox(t);
+  const env = { TZ: "UTC" };
+  const reflectA = (nowIso, window = []) => {
+    const dir = run(["reflect", A], nowIso, env).out.trim();
+    writeFileSync(join(dir, "synthesis.md"), "x\n");
+    assert.equal(run(["register", A, "--reflected", dir, ...window], nowIso, env).code, 0);
+  };
+  reflectA("2026-10-01T08:00:00Z");
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
+  const fresh = /steward is a long-running agent with no reflect of its new window; reflect it first, registering the window slice printed, then open the round/;
+  assert.match(run(["open"], "2026-10-16T09:00:00Z", env).err, /long-running agent steward is past the days allowed with no reflect of the new window/, "a windowless reflect is not selected");
+  assert.match(run(["open", "--threads", A], "2026-10-16T09:00:00Z", env).err, fresh);
+  reflectA("2026-10-16T09:10:00Z", ["--from-seq", "0", "--to-seq", "9", "--through-at", "2026-10-16T09:00:00Z"]);
+  assert.equal(run(["open", "--threads", A], "2026-10-16T09:20:00Z", env).code, 0);
+  assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
+  assert.match(run(["open", "--threads", A], "2026-10-18T09:00:00Z", env).err, fresh, "after a closed round the refusal still says what to do next");
+});
+
+test("an old windowless reflect of a marked agent neither joins nor blocks a due round of settled threads", (t) => {
+  const { run, reflect } = sandbox(t);
+  const env = { TZ: "UTC" };
+  const dir = run(["reflect", A], "2026-10-01T08:00:00Z", env).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  run(["register", A, "--reflected", dir], "2026-10-01T08:00:00Z", env);
+  reflect(B, "2026-10-01T09:00:00Z");
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-08T09:00:00Z", env);
+  assert.match(run(["status"], "2026-10-09T10:00:00Z", env).out, /Round due: yes, 1 reflect waiting, oldest 8 days; long-running agents: 0 of 1 overdue/);
+  const opened = run(["open"], "2026-10-09T10:00:00Z", env);
+  assert.equal(opened.code, 0, opened.err);
+  assert.deepEqual(JSON.parse(readFileSync(join(opened.out.trim(), "round.json"), "utf-8")).threads, [B]);
+});
+
+test("the registry says a marked agent waiting with only a windowless reflect is left out of open", (t) => {
+  const { run, reflect } = sandbox(t);
+  const dir = run(["reflect", A]).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  run(["register", A, "--reflected", dir, "--title", "steward", "--long-running", "--host", "box"]);
+  reflect(B);
+  const status = run(["status"]).out;
+  assert.match(status, /\| \[steward\][^\n]*<br>long-running agent: open leaves it out until it has a reflect that names its window \|/);
+  assert.doesNotMatch(status.split("\n").find((l) => l.includes("bbbbbbbb")), /long-running agent/);
+});
+
+test("a failed tool call shows as failed with the end of its output; a successful one stays one line", (t) => {
+  const dir = writeExport(join(scratchDir(t), "export"), [
+    ["command_execution", "2026-11-01T09:00:00Z", { input: "run-checks", output: `${"ok\n".repeat(400)}AssertionError: expected 3, got 2\n`, exitCode: 0, outputIndicatesFailure: true }],
+    ["command_execution", "2026-11-01T09:01:00Z", { input: "make", output: "error: missing target", exitCode: 2 }],
+    ["dynamic_tool", "2026-11-01T09:02:00Z", { toolName: "fetch", input: { url: "x" }, output: { error: "timed out" } }],
+    ["command_execution", "2026-11-01T09:03:00Z", { input: "git status", output: "secret-looking-but-fine output", exitCode: 0 }],
+  ]);
+  const rows = readFileSync(join(dir, "activity.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  rows[2].status = "failed";
+  writeFileSync(join(dir, "activity.jsonl"), `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  const chunk = readFileSync(join(dir, "slice-0-3", "chunks", "chunk-01.md"), "utf-8");
+  assert.match(chunk, /\[seq 0 09:00 command, exit 0, failed\] run-checks\n\[cut \d+ characters\] [\s\S]*AssertionError: expected 3, got 2\n/);
+  assert.ok(chunk.indexOf("[seq 1") - chunk.indexOf("[seq 0") < 700, "the output tail is bounded");
+  assert.match(chunk, /\[seq 1 09:01 command, exit 2, failed\] make\nerror: missing target\n/);
+  assert.match(chunk, /\[seq 2 09:02 tool fetch, failed\] \{"url":"x"\}\n\{"error":"timed out"\}\n/);
+  assert.match(chunk, /\[seq 3 09:03 command, exit 0\] git status\n?$/);
+});
+
+test("index.md lists the person's messages one by one only up to twenty a day, and keeps each excerpt short", (t) => {
+  const entries = [];
+  for (let i = 0; i < 25; i++) entries.push(person(`2026-11-01T09:${String(i).padStart(2, "0")}:00Z`, `busy day message ${i} ${"z".repeat(500)}`));
+  for (let i = 0; i < 3; i++) entries.push(person(`2026-11-02T09:0${i}:00Z`, `quiet day message ${i}`));
+  const dir = writeExport(join(scratchDir(t), "export"), entries);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  const index = readFileSync(join(dir, "slice-0-27", "index.md"), "utf-8");
+  assert.match(index, /## 2026-11-01\n\n### seq 0–24, before the first compaction \(25 items\)\n\n- From the person: 25, seq 0–24\n\n/);
+  assert.doesNotMatch(index, /busy day message/);
+  assert.match(index, /  - seq 25, 09:00: quiet day message 0\n/);
+  for (const line of index.split("\n")) assert.ok(line.length < 400, `a line of ${line.length} characters`);
+});
+
+test("the backup holds back export and slice files by what they are, wherever they were copied, and keeps ordinary files", (t) => {
+  const { store, run, reflect } = sandbox(t);
+  const { pushedFiles } = backedUp(t, store);
+  const exportDir = smallExport(t);
+  mkdirSync(join(exportDir, "children"));
+  writeFileSync(join(exportDir, "children", "child.jsonl"), readFileSync(join(exportDir, "activity.jsonl")));
+  writeFileSync(join(exportDir, "messages.jsonl"), `${JSON.stringify({ id: "m1", role: "user", createdAt: "2026-11-01T09:00:00Z", message: { text: "Please set up the nightly job." } })}\n`);
+  writeFileSync(join(exportDir, "children.json"), JSON.stringify([{ parent: A, id: "s1", childThreadId: "c1", status: "completed", record: { prompt: "Please set up the nightly job." } }]));
+  assert.equal(run(["slice", exportDir], undefined, { TZ: "UTC" }).code, 0);
+
+  const evidence = join(scratchDir(t), "evidence");
+  mkdirSync(evidence);
+  for (const f of ["activity.jsonl", "messages.jsonl", "children.json"]) cpSync(join(exportDir, f), join(evidence, f));
+  cpSync(join(exportDir, "children", "child.jsonl"), join(evidence, "child.jsonl"));
+  cpSync(join(exportDir, "slice-0-10", "index.md"), join(evidence, "index.md"));
+  cpSync(join(exportDir, "slice-0-10", "chunks", "chunk-01.md"), join(evidence, "chunk-01.md"));
+  writeFileSync(join(evidence, "events.jsonl"), `${JSON.stringify({ ts: 1, event: "deploy" })}\n`);
+  writeFileSync(join(evidence, "deploys.jsonl"), `${JSON.stringify({ id: "d1", role: "operator", createdAt: "2026-11-01T09:00:00Z", message: "rolled out v2" })}\n`);
+  writeFileSync(join(evidence, "tasks.json"), JSON.stringify([{ parent: "root", id: "t1", title: "ship" }]));
+  writeFileSync(join(evidence, "notes.md"), "# Notes\n");
+  const docs = join(scratchDir(t), "docs");
+  mkdirSync(docs);
+  writeFileSync(join(docs, "index.md"), "# An ordinary index\n");
+  const linked = join(scratchDir(t), "linked");
+  mkdirSync(linked);
+  symlinkSync(join(evidence, "activity.jsonl"), join(linked, "detached.jsonl"));
+  const loose = join(scratchDir(t), "messages.jsonl");
+  cpSync(join(exportDir, "messages.jsonl"), loose);
+
+  const trail = run(["register", A, "--trail", evidence, "--trail", linked, "--trail", loose, "--trail", docs]);
+  assert.equal(trail.code, 0, trail.err);
+  assert.match(trail.err, /activity\.jsonl is transcript text from a thread export or a slice, so it is not backed up/);
+  reflect(B);
+  const opened = run(["open", "--input", evidence]);
+  assert.equal(opened.code, 0, opened.err);
+  const files = pushedFiles();
+  for (const keep of ["events.jsonl", "deploys.jsonl", "tasks.json", "notes.md", `${A}/thread.json`]) assert.ok(files.some((f) => f.endsWith(keep)), `${keep} is backed up`);
+  assert.ok(files.some((f) => f.endsWith("/index.md") && f.includes("docs")), "an ordinary index.md is backed up");
+  const leaked = files.filter((f) => /activity\.jsonl|messages\.jsonl|children\.json|child\.jsonl|detached\.jsonl|chunk-01\.md/.test(f) || (f.endsWith("index.md") && !f.includes("docs")));
+  assert.deepEqual(leaked, []);
 });

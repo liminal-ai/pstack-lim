@@ -2,20 +2,22 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const USAGE = `usage: retro.mjs <command>
   reflect <thread-id> [--title T] [--project P]
-  register <thread-id> [--title T] [--project P] [--model PROVIDER/MODEL@FROM]... [--trail PATH]... [--reflected DIR]
+  register <thread-id> [--title T] [--project P] [--model PROVIDER/MODEL@FROM]... [--trail PATH]... [--reflected DIR [--from-seq N --to-seq N --through-at ISO]]
+           [--long-running --host H [--limbase-thread ID] [--days-allowed N] | --no-long-running]
   status
   open [--threads ID,ID] [--input PATH]... [--at YYYY-MM-DD] [--earlier REASON]
   close <round> [--at YYYY-MM-DD]
   archive <round>
   backlog [--all]
   remind [--answered]
+  slice <export-dir> [--from-seq N] [--to-seq N]
   migrate-paths`;
 
 // t3_thread_launch makes mcp: and a UUID, or mcp:launch: and a SHA-256 hex digest when given a clientRequestId.
@@ -36,6 +38,9 @@ const SELF = "node ~/.agents/skills/reflect/scripts/retro.mjs";
 const ROUND_ID = /^\d{4}-\d{2}-\d{2}(-\d+)?$/;
 const ARCHIVE = resolve(process.env.RETRO_ARCHIVE ?? "/archive/retro");
 const ARCHIVE_KEEP_DAYS = 7;
+const DAYS_ALLOWED = 14;
+// About 75k tokens, so one reader takes a chunk with room to spare. A window that renders larger is split.
+const CHUNK_CHARS = 300000;
 
 class Refusal extends Error {}
 const refuse = (msg) => {
@@ -161,6 +166,9 @@ function pendingReflects(thread, rounds) {
   return thread.reflects.filter((c) => !taken.has(c.dir));
 }
 
+// Only a reflect that names the window it read is a review of an agent's new history.
+const freshReflects = (thread, rounds) => pendingReflects(thread, rounds).filter((c) => c.window);
+
 function statusOf(thread, rounds) {
   const inRounds = rounds.filter((r) => r.threads.includes(thread.thread));
   const open = inRounds.find((r) => !r.closedAt);
@@ -171,18 +179,53 @@ function statusOf(thread, rounds) {
   return { kind: "no-reflect" };
 }
 
-function dueReason({ threads, rounds }, at) {
+const days = (n) => `${n} day${n === 1 ? "" : "s"}`;
+
+function settledDue({ threads, rounds }, at) {
   const open = rounds.find((r) => !r.closedAt);
   if (open) {
     const openDays = Math.floor((at.getTime() - new Date(open.openedAt).getTime()) / DAY);
-    const reason = `round ${open.round} has been open ${openDays} day${openDays === 1 ? "" : "s"}`;
+    const reason = `round ${open.round} has been open ${days(openDays)}`;
     return { due: openDays >= STALE_ROUND_DAYS, reason: openDays >= STALE_ROUND_DAYS ? `${reason}; finish and close it` : reason };
   }
-  const waiting = [...threads.values()].flatMap((t) => pendingReflects(t, rounds)).map((c) => new Date(c.completedAt).getTime());
+  const settled = [...threads.values()].filter((t) => !t.longRunning?.active);
+  const waiting = settled.flatMap((t) => pendingReflects(t, rounds)).map((c) => new Date(c.completedAt).getTime());
   if (waiting.length === 0) return { due: false, reason: "no reflects waiting" };
   const ageDays = Math.floor((at.getTime() - Math.min(...waiting)) / DAY);
-  const summary = `${waiting.length} reflect${waiting.length === 1 ? "" : "s"} waiting, oldest ${ageDays} day${ageDays === 1 ? "" : "s"}`;
+  const summary = `${waiting.length} reflect${waiting.length === 1 ? "" : "s"} waiting, oldest ${days(ageDays)}`;
   return { due: waiting.length >= DUE_COUNT || ageDays >= DUE_AGE_DAYS, reason: summary };
+}
+
+function longRunningAgents({ threads, rounds }, at) {
+  return [...threads.values()]
+    .filter((t) => t.longRunning?.active)
+    .map((t) => {
+      const lastRetro = rounds.filter((r) => r.closedAt && r.threads.includes(t.thread)).map((r) => r.closedAt).sort((a, b) => new Date(a) - new Date(b)).at(-1) ?? null;
+      const daysSince = Math.floor((at.getTime() - new Date(lastRetro ?? t.longRunning.markedAt).getTime()) / DAY);
+      const covered = t.reflects.filter((c) => c.window).sort((a, b) => a.window.toSeq - b.window.toSeq).at(-1)?.window ?? null;
+      return { t, lastRetro, daysSince, overdue: daysSince >= t.longRunning.daysAllowed, covered };
+    });
+}
+
+const agentName = (t) => t.title ?? t.thread;
+
+function longRunningSummary(agents) {
+  if (!agents.length) return "no long-running agents marked";
+  const overdue = agents.filter((a) => a.overdue).length;
+  const each = agents.map(({ t, lastRetro, daysSince }) =>
+    lastRetro
+      ? `${agentName(t)}: last retro ${lastRetro.slice(0, 10)}, ${days(daysSince)} ago, ${t.longRunning.daysAllowed} allowed`
+      : `${agentName(t)}: last retro never, marked ${days(daysSince)} ago, ${t.longRunning.daysAllowed} allowed`,
+  );
+  return `long-running agents: ${overdue} of ${agents.length} overdue (${each.join("; ")})`;
+}
+
+// A round is due for settled threads' reflects, or for a long-running agent past its days allowed; an agent's own reflects count only through its days allowed. While a round is open, only that round can make one due.
+function dueReason(state, at) {
+  const settled = settledDue(state, at);
+  const agents = longRunningAgents(state, at);
+  const open = state.rounds.some((r) => !r.closedAt);
+  return { due: settled.due || (!open && agents.some((a) => a.overdue)), reason: `${settled.reason}; ${longRunningSummary(agents)}` };
 }
 
 function within(path, dir) {
@@ -258,6 +301,20 @@ function isExport(dir) {
   }
 }
 
+// A slice carries a MANIFEST.json of its own, so it is kept out of the backup wherever it is copied.
+const isSlice = (dir) => isExport(dir) && Boolean(JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf-8")).slice);
+
+function insideExport(path) {
+  for (let p = dirname(path); p !== dirname(p); p = dirname(p)) if (isExport(p)) return true;
+  return false;
+}
+
+// A trail or input must be a whole export, never part of one, and never transcript text taken out of one.
+function refusePartOfExport(path, what) {
+  const target = real(path);
+  if (isSlice(target) || insideExport(target) || basename(target) === "activity.jsonl") refuse(`${what} ${path} is part of a thread export or a slice of one, which must never be backed up; pass the export folder itself`);
+}
+
 function findExports(dir) {
   if (!existsSync(dir)) return [];
   if (isExport(dir)) return [dir];
@@ -274,6 +331,9 @@ function digest(path) {
 
 // A copied .git would reach the backup as a bare gitlink, so copies keep only the files.
 function copyResolved(src, dest) {
+  if (lstatSync(src).isSymbolicLink() && (isSlice(real(src)) || insideExport(real(src)))) {
+    return console.error(`warning: ${src} links into a thread export or a slice, so it is not copied`);
+  }
   if (statSync(src).isDirectory()) {
     mkdirSync(dest);
     for (const name of readdirSync(src)) if (name !== ".git") copyResolved(join(src, name), join(dest, name));
@@ -289,6 +349,7 @@ function current(rec, source) {
 // Every check and read happens here, before anything is copied, so a refusal leaves nothing behind.
 function planTrail(rec, path) {
   const source = resolve(path);
+  if (existsSync(source)) refusePartOfExport(source, "trail");
   const last = current(rec, source);
   if (!existsSync(source)) {
     if (last?.mode === "copied" && existsSync(last.path)) return { kind: "keep", source, path: last.path };
@@ -355,6 +416,42 @@ function threadRecord(id, args, at) {
   return { rec, file, home: join(RETRO, id) };
 }
 
+function wholeNumber(value, flag) {
+  if (!/^\d+$/.test(value)) refuse(`${flag} takes a whole number, got ${value}`);
+  return Number(value);
+}
+
+function markLongRunning(rec, args, at) {
+  const mark = args["long-running"];
+  const details = ["host", "limbase-thread", "days-allowed"].filter((k) => args[k] !== undefined);
+  if (mark && args["no-long-running"]) refuse("pass --long-running or --no-long-running, not both");
+  if (details.length && !mark) refuse(`--${details[0]} goes with --long-running`);
+  if (args["no-long-running"]) {
+    if (rec.longRunning?.active) rec.longRunning = { ...rec.longRunning, active: false, unmarkedAt: stamp(at) };
+    return;
+  }
+  if (!mark) return;
+  const was = rec.longRunning?.active ? rec.longRunning : null;
+  const host = args.host ?? was?.host;
+  if (!host) refuse("--long-running needs --host, the machine whose T3 holds the thread");
+  const daysAllowed = args["days-allowed"] !== undefined ? wholeNumber(args["days-allowed"], "--days-allowed") : (was?.daysAllowed ?? DAYS_ALLOWED);
+  if (daysAllowed < 1) refuse("--days-allowed takes at least 1");
+  rec.longRunning = { active: true, host, limbaseThread: args["limbase-thread"] ?? was?.limbaseThread ?? null, daysAllowed, markedAt: was?.markedAt ?? stamp(at) };
+}
+
+function windowOf(args) {
+  const given = ["from-seq", "to-seq", "through-at"].filter((k) => args[k] !== undefined);
+  if (!given.length) return null;
+  if (!args.reflected) refuse(`--${given[0]} describes a reflect; pass it with --reflected`);
+  if (given.length < 3) refuse("a reflect's window needs --from-seq, --to-seq and --through-at together");
+  const fromSeq = wholeNumber(args["from-seq"], "--from-seq");
+  const toSeq = wholeNumber(args["to-seq"], "--to-seq");
+  if (toSeq < fromSeq) refuse(`--to-seq ${toSeq} is before --from-seq ${fromSeq}`);
+  const through = new Date(args["through-at"]);
+  if (Number.isNaN(through.getTime())) refuse(`--through-at takes an ISO time, got ${args["through-at"]}`);
+  return { fromSeq, toSeq, throughAt: stamp(through) };
+}
+
 function cmdReflect(args) {
   const at = now();
   const { rec, file, home } = threadRecord(args._[0], args, at);
@@ -368,12 +465,15 @@ function cmdReflect(args) {
 function cmdRegister(args) {
   const at = now();
   const { rec, file, home } = threadRecord(args._[0], args, at);
+  markLongRunning(rec, args, at);
   const dir = args.reflected && resolve(args.reflected);
   if (dir && !within(dir, home)) refuse(`--reflected takes a folder inside ${home}, got ${dir}`);
   if (dir && !isFile(join(dir, "synthesis.md"))) refuse(`write the reflect outputs first: ${join(dir, "synthesis.md")} is missing`);
+  const window = windowOf(args);
   const plans = [...new Set(args.trail.map((trail) => resolve(trail)))].map((trail) => planTrail(rec, trail));
   for (const plan of plans) applyTrail(home, rec, plan, at);
   if (dir && !rec.reflects.some((c) => c.dir === dir)) rec.reflects.push({ dir, completedAt: stamp(at) });
+  if (window) rec.reflects.find((c) => c.dir === dir).window = window;
   writeRecord(file, rec);
   save(`register ${rec.thread}`);
   console.log(home);
@@ -447,8 +547,21 @@ function renderRegistry(state, at, { secrets, failure }) {
     "## Waiting for a round",
     "",
     ...table(
-      by("waiting").map((t) => `| ${threadLabel(t)} | ${t.project ?? "?"} | ${modelsCell(t)} | ${pendingReflects(t, rounds).map((c) => `\`${c.dir}\``).join("<br>")} | ${decided(t)} | ${trailsCell(t)} |`),
+      by("waiting").map((t) => {
+        const unwindowed = t.longRunning?.active && !freshReflects(t, rounds).length ? "<br>long-running agent: open leaves it out until it has a reflect that names its window" : "";
+        return `| ${threadLabel(t)} | ${t.project ?? "?"} | ${modelsCell(t)} | ${pendingReflects(t, rounds).map((c) => `\`${c.dir}\``).join("<br>")}${unwindowed} | ${decided(t)} | ${trailsCell(t)} |`;
+      }),
       "| thread | project | models | reflects | decisions | trails |",
+    ),
+    "",
+    "## Long-running agents",
+    "",
+    ...table(
+      longRunningAgents(state, at).map(({ t, lastRetro, daysSince, overdue, covered }) => {
+        const position = covered ? `seq ${covered.toSeq}, through ${covered.throughAt}` : "none";
+        return `| ${threadLabel(t)} | ${t.project ?? "?"} | ${t.longRunning.host} | ${t.longRunning.limbaseThread ?? "none"} | ${lastRetro?.slice(0, 10) ?? "never"} | ${daysSince}${overdue ? ", overdue" : ""} | ${t.longRunning.daysAllowed} | ${position} |`;
+      }),
+      "| thread | project | host | Limbase thread | last retro | days since | days allowed | last position covered |",
     ),
     "",
     "## Registered, no reflect yet",
@@ -529,7 +642,57 @@ function scanCommits(gitleaks, range) {
 function stageAll() {
   const exports = findExports(RETRO).map((p) => relative(RETRO, p));
   if (exports.length) git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...exports.map((p) => `:(literal)${p}`));
-  return git("add", "-A", "--force", "--", ".", ...NEVER_BACKED_UP.map((p) => `:(exclude,glob)**/${p}`), ...exports.map((p) => `:(exclude,literal)${p}`));
+  git("add", "-A", "--force", "--", ".", ...NEVER_BACKED_UP.map((p) => `:(exclude,glob)**/${p}`), ...exports.map((p) => `:(exclude,literal)${p}`));
+  // Every file passes here on its way to the backup, so transcript text is held back by what it is, wherever it was copied.
+  const transcript = git("ls-files", "-z").stdout.split("\0").filter((f) => f && isTranscript(join(RETRO, f)));
+  if (!transcript.length) return;
+  git("rm", "-q", "--cached", "--", ...transcript.map((f) => `:(literal)${f}`));
+  for (const f of transcript) console.error(`retro: ${join(RETRO, f)} is transcript text from a thread export or a slice, so it is not backed up`);
+}
+
+const SLICE_MARK = "<!-- retro.mjs slice output: transcript text, never backed up -->";
+
+function firstLine(path, limit) {
+  const fd = openSync(path, "r");
+  try {
+    const parts = [];
+    const buf = Buffer.alloc(65536);
+    for (let total = 0, n; total < limit && (n = readSync(fd, buf, 0, buf.length, total)) > 0; total += n) {
+      const end = buf.subarray(0, n).indexOf(10);
+      parts.push(Buffer.from(buf.subarray(0, end === -1 ? n : end)));
+      if (end !== -1) break;
+    }
+    return Buffer.concat(parts).toString("utf-8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+const keysAre = (row, keys) => isObject(row) && Object.keys(row).sort().join() === [...keys].sort().join();
+const strings = (row, keys) => keys.every((k) => typeof row[k] === "string");
+
+// The exact rows retro-export-thread writes, so an ordinary record that only shares some field names is still backed up.
+const EXPORT_ROWS = {
+  activity: (r) => keysAre(r, ["seq", "ordinal", "id", "type", "status", "updatedAt", "item"]) && Number.isInteger(r.seq) && Number.isInteger(r.ordinal) && strings(r, ["id", "type", "status", "updatedAt"]) && isObject(r.item) && r.item.type === r.type,
+  message: (r) => keysAre(r, ["id", "role", "createdAt", "message"]) && strings(r, ["id", "createdAt"]) && ["user", "assistant", "system"].includes(r.role) && isObject(r.message),
+  child: (r) => keysAre(r, ["parent", "id", "childThreadId", "status", "record"]) && strings(r, ["parent", "id", "status"]) && (r.childThreadId === null || typeof r.childThreadId === "string") && isObject(r.record),
+};
+
+function isTranscript(path) {
+  try {
+    if (path.endsWith(".md")) return firstLine(path, 256) === SLICE_MARK;
+    if (path.endsWith(".json")) {
+      if (!/^\[\s*\{\s*"parent"/.test(firstLine(path, 256))) return false;
+      const records = JSON.parse(readFileSync(path, "utf-8"));
+      return Array.isArray(records) && records.length > 0 && records.every(EXPORT_ROWS.child);
+    }
+    if (!path.endsWith(".jsonl")) return false;
+    const row = JSON.parse(firstLine(path, 1 << 26));
+    return EXPORT_ROWS.activity(row) || EXPORT_ROWS.message(row);
+  } catch {
+    return false;
+  }
 }
 
 function backupFailed(state, step, r) {
@@ -700,15 +863,20 @@ function cmdOpen(args) {
       ? [...new Set(args.threads.split(",").map((s) => s.trim()).filter(Boolean))]
       : args.earlier
         ? []
-        : [...state.threads.values()].filter((t) => statusOf(t, state.rounds).kind === "waiting").map((t) => t.thread);
+        : [...state.threads.values()].filter((t) => statusOf(t, state.rounds).kind === "waiting" && (!t.longRunning?.active || freshReflects(t, state.rounds).length)).map((t) => t.thread);
   for (const id of ids) {
     const t = state.threads.get(id);
     if (!t) refuse(`thread ${id} is not registered; run register first`);
+    if (t.longRunning?.active && !freshReflects(t, state.rounds).length) refuse(`${agentName(t)} is a long-running agent with no reflect of its new window; reflect it first, registering the window slice printed, then open the round`);
     const s = statusOf(t, state.rounds);
     if (s.kind === "retrod") refuse(`thread ${id} was retro'd in round ${s.round} and has not reflected since`);
   }
+  // A long-running agent joins a round only with a fresh reflect, so the default never leaves an overdue one out without saying so.
+  const unreflected = args.threads === undefined && !args.earlier ? longRunningAgents(state, now()).filter((a) => a.overdue && !freshReflects(a.t, state.rounds).length) : [];
+  if (unreflected.length) refuse(`long-running agent${unreflected.length === 1 ? "" : "s"} ${unreflected.map((a) => agentName(a.t)).join(", ")} ${unreflected.length === 1 ? "is" : "are"} past the days allowed with no reflect of the new window; reflect ${unreflected.length === 1 ? "it" : "them"} first, then open the round, or name the threads to include with --threads`);
   if (ids.length === 0 && !args.earlier) refuse("no threads are waiting; pass --threads to choose some");
   for (const p of args.input) if (!existsSync(p)) refuse(`input not found: ${p}`);
+  for (const p of args.input) refusePartOfExport(resolve(p), "input");
   mkdirSync(ROUNDS, { recursive: true });
   for (const p of args.input) if (within(real(ROUNDS), real(p))) refuse(`input ${p} contains the rounds folder; name something inside it instead`);
   const reflects = ids.flatMap((id) => pendingReflects(state.threads.get(id), state.rounds).map((c) => c.dir));
@@ -864,6 +1032,208 @@ function cmdRemind(args) {
   console.log(`ASK: ${reason}`);
 }
 
+const SLICE_KINDS = {
+  person: { label: () => "person", cap: 20000 },
+  agent: { label: () => "agent", cap: 20000 },
+  prompt: { label: (it) => (it.senderThreadId ? `from thread ${it.senderThreadId}` : `from ${it.createdBy ?? "?"}`), cap: 4000 },
+  tick: { label: (it) => `scheduled tick ${it.scheduledTaskId}`, cap: 200, oneLine: true },
+  compaction: { label: (it) => `compaction${it.beforeTokenCount ? `, ${it.beforeTokenCount} to ${it.afterTokenCount ?? "?"} tokens` : ""}`, cap: 300, oneLine: true },
+  error: { label: () => "error", cap: 300, oneLine: true },
+  interrupt: { label: (it, type) => type.replaceAll("_", " "), cap: 300, oneLine: true },
+  tool: { label: (it, type) => (type === "dynamic_tool" ? `tool ${it.toolName ?? "?"}` : type === "command_execution" ? `command${it.exitCode !== undefined ? `, exit ${it.exitCode}` : ""}` : type.replaceAll("_", " ")), cap: 300, oneLine: true },
+};
+
+// A user_message is the person's own only when a person wrote it here: not a schedule, and not sent by another thread or an agent.
+function sliceKind(row) {
+  const it = row.item ?? {};
+  if (row.type === "user_message") return it.scheduledTaskId ? "tick" : it.createdBy === "user" && !it.senderThreadId ? "person" : "prompt";
+  if (row.type === "assistant_message") return "agent";
+  if (row.type === "compaction" || row.type === "error") return row.type;
+  if (row.type === "run_interrupt_request" || row.type === "run_interrupt_result") return "interrupt";
+  return row.type === "reasoning" || row.type === "checkpoint" ? null : "tool";
+}
+
+function sliceText(row) {
+  const it = row.item ?? {};
+  if (row.type === "error") return it.failure?.message ?? "";
+  const value = it.text ?? it.input ?? it.message ?? it.title ?? it.fileName ?? "";
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function cut(text, cap, oneLine) {
+  const flat = oneLine ? text.replace(/\s+/g, " ").trim() : text.trim();
+  return flat.length > cap ? `${flat.slice(0, cap)} [cut ${flat.length - cap} characters]` : flat;
+}
+
+const rowTime = (row) => new Date(row.item?.startedAt ?? row.updatedAt);
+// Slices bucket and print in UTC, so every machine writes the same files for one export.
+const utc = (date) => date.toISOString().replace(/\.\d{3}Z$/, "Z");
+const UNFINISHED = new Set(["idle", "pending", "running", "waiting"]);
+const unfinished = (row) => UNFINISHED.has(row.status ?? row.item?.status) || row.item?.streaming === true;
+
+const OUTPUT_TAIL = 600;
+
+const failed = (row) => (row.item?.exitCode ?? 0) !== 0 || row.item?.outputIndicatesFailure === true || (row.status ?? row.item?.status) === "failed";
+
+// A failed tool call keeps the end of its output, where the failure usually shows. Other tool calls stay one line.
+function failureTail(row) {
+  const output = row.item?.output;
+  if (output === undefined || output === null) return "";
+  const text = (typeof output === "string" ? output : JSON.stringify(output)).trim();
+  return text.length > OUTPUT_TAIL ? `[cut ${text.length - OUTPUT_TAIL} characters] ${text.slice(-OUTPUT_TAIL)}` : text;
+}
+
+function renderRow(row) {
+  const name = sliceKind(row);
+  const kind = SLICE_KINDS[name];
+  if (!kind) return null;
+  const text = cut(sliceText(row), kind.cap, kind.oneLine);
+  const fail = name === "tool" && failed(row);
+  const line = `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}${fail ? ", failed" : ""}${unfinished(row) ? ", still running at export" : ""}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+  const tail = fail ? failureTail(row) : "";
+  return tail ? `${line}\n${tail}` : line;
+}
+
+const epochName = (n) => (n === 0 ? "before the first compaction" : `after compaction ${n}`);
+const seqRange = (seqs) => (seqs.length === 1 ? `seq ${seqs[0]}` : `seq ${seqs[0]}–${seqs.at(-1)}`);
+
+const INDEX_LIST = 20;
+const seqList = (seqs) => (seqs.length > INDEX_LIST ? `${seqs.slice(0, INDEX_LIST).join(", ")} and ${seqs.length - INDEX_LIST} more` : seqs.join(", "));
+
+// Past INDEX_LIST of the person's messages in a day, the index gives their count and positions, and the chunks hold the text.
+function segmentIndex(seg, excerpts) {
+  const of = (kind) => seg.rows.filter((r) => sliceKind(r) === kind);
+  const person = of("person");
+  const ticks = Object.entries(Object.groupBy(of("tick"), (r) => r.item.scheduledTaskId));
+  const prompts = of("prompt");
+  const errors = of("error");
+  const interrupts = of("interrupt");
+  const lines = [`### seq ${seg.rows[0].seq}–${seg.rows.at(-1).seq}, ${epochName(seg.epoch)} (${seg.rows.length} items)`, ""];
+  lines.push(`- From the person: ${person.length || "none"}${person.length && !excerpts ? `, ${seqRange(person.map((r) => r.seq))}` : ""}`);
+  if (excerpts) for (const r of person) lines.push(`  - seq ${r.seq}, ${utc(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
+  for (const [task, rows] of ticks) lines.push(`- Scheduled ticks from \`${task}\`: ${rows.length}, ${seqRange(rows.map((r) => r.seq))}`);
+  if (prompts.length) lines.push(`- From other threads or agents: ${prompts.length}, ${seqRange(prompts.map((r) => r.seq))}`);
+  if (errors.length) lines.push(`- Errors at seq ${seqList(errors.map((r) => r.seq))}`);
+  if (interrupts.length) lines.push(`- Interrupts at seq ${seqList(interrupts.map((r) => r.seq))}`);
+  return [...lines, ""];
+}
+
+function packChunks(segments) {
+  const chunks = [];
+  let open = null;
+  const add = (heading, lines) => {
+    const size = heading.length + lines.reduce((n, l) => n + (l.text?.length ?? 0) + 1, 0);
+    if (open && open.size + size > CHUNK_CHARS) open = null;
+    if (!open) chunks.push((open = { size: 0, parts: [], from: lines[0].seq, to: null }));
+    open.parts.push(heading, ...lines.map((l) => l.text).filter((text) => text !== null), "");
+    open.size += size;
+    open.to = lines.at(-1).seq;
+  };
+  for (const seg of segments) {
+    const heading = `## ${seg.day}, ${epochName(seg.epoch)}\n`;
+    const lines = seg.rows.map((r) => ({ seq: r.seq, text: renderRow(r) }));
+    let piece = [];
+    let size = heading.length;
+    for (const line of lines) {
+      if (piece.length && size + (line.text?.length ?? 0) + 1 > CHUNK_CHARS) {
+        add(heading, piece);
+        piece = [];
+        size = heading.length;
+      }
+      piece.push(line);
+      size += (line.text?.length ?? 0) + 1;
+    }
+    if (piece.length) add(heading, piece);
+  }
+  return chunks;
+}
+
+function cmdSlice(args) {
+  const given = args._[0] ?? refuse("slice needs the export folder that retro-export-thread wrote");
+  if (!existsSync(given)) refuse(`not found: ${given}`);
+  // The slice holds transcript text, and only an export's MANIFEST.json keeps a folder out of the backup, so it is written inside the real export and nowhere else.
+  const source = realpathSync(given);
+  if (!statSync(source).isDirectory() || !isExport(source)) refuse(`${source} is not an export folder with a MANIFEST.json; slice writes only inside the folder retro-export-thread wrote, which is never backed up`);
+  const file = join(source, "activity.jsonl");
+  if (!isFile(file)) refuse(`${file} is missing; slice reads the activity.jsonl that retro-export-thread writes`);
+  const rows = readFileSync(file, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line, i) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        refuse(`${file} line ${i + 1} is not JSON`);
+      }
+    });
+  rows.forEach((r, i) => r.seq !== i && refuse(`${file} line ${i + 1} has seq ${r.seq}; an export numbers its items from 0 in order`));
+  if (!rows.length) refuse(`${file} has no items`);
+  const last = rows.length - 1;
+  const from = args["from-seq"] !== undefined ? wholeNumber(args["from-seq"], "--from-seq") : 0;
+  const asked = args["to-seq"] !== undefined ? wholeNumber(args["to-seq"], "--to-seq") : last;
+  if (asked > last) refuse(`--to-seq ${asked} is past the export's last item, seq ${last}`);
+  // T3 rewrites an item in place until it finishes, so the window ends before the unfinished items at its end and the next window starts with them.
+  let to = asked;
+  while (to >= from && unfinished(rows[to])) to--;
+  if (to < from) refuse(`nothing new to reflect from seq ${from}: ${asked < from ? `the window ends at seq ${asked}` : `seq ${from}–${asked} are still running`}. Nothing is new since the last reflect, so stop here`);
+
+  const segments = [];
+  let epoch = rows.slice(0, from).filter((r) => r.type === "compaction").length;
+  for (const row of rows.slice(from, to + 1)) {
+    if (row.type === "compaction") epoch++;
+    const d = utc(rowTime(row)).slice(0, 10);
+    const seg = segments.at(-1);
+    if (seg && seg.day === d && seg.epoch === epoch) seg.rows.push(row);
+    else segments.push({ day: d, epoch, rows: [row] });
+  }
+  const window = rows.slice(from, to + 1);
+  const stillRunning = window.filter(unfinished).map((r) => r.seq);
+  const count = (kind) => window.filter((r) => sliceKind(r) === kind).length;
+  const rendered = window.map(renderRow).filter((l) => l !== null).reduce((n, l) => n + l.length + 1, 0);
+  const chunks = packChunks(segments);
+  const throughAt = utc(rowTime(rows[to]));
+  const out = join(source, `slice-${from}-${to}`);
+  const chunkName = (i) => `chunks/chunk-${String(i + 1).padStart(2, "0")}.md`;
+
+  const index = [
+    SLICE_MARK,
+    `# Window seq ${from}–${to}`,
+    "",
+    `From \`${file}\`: ${window.length} items, ${utc(rowTime(rows[from]))} to ${throughAt}. Days and times are UTC.`,
+    "",
+    ...(to < asked ? [`Seq ${to + 1}–${asked} were still running at export, so this window ends at seq ${to} and the next one starts with them.`, ""] : []),
+    `Register the reflect over it with \`--from-seq ${from} --to-seq ${to} --through-at ${throughAt}\`.`,
+    "",
+    `Totals: ${count("person")} from the person, ${count("tick")} scheduled ticks, ${count("prompt")} from other threads or agents, ${count("compaction")} compactions, ${count("error")} errors, ${count("interrupt")} interrupts.`,
+    "",
+    `The window renders to ${rendered} characters in ${chunks.length === 1 ? "one chunk" : `${chunks.length} chunks, split at day and compaction boundaries, and within a day when one day is too large for a chunk`}. Read the chunks, and read an item in activity.jsonl only to check a piece of evidence and the items around it:`,
+    "",
+    ...chunks.map((c, i) => `- \`${chunkName(i)}\`: seq ${c.from}–${c.to}`),
+    ...(stillRunning.length ? ["", `Still running at export, so read as they were then: seq ${seqList(stillRunning)}.`] : []),
+    "",
+    ...Object.entries(Object.groupBy(segments, (s) => s.day)).flatMap(([d, segs]) => {
+      const excerpts = segs.flatMap((seg) => seg.rows).filter((r) => sliceKind(r) === "person").length <= INDEX_LIST;
+      return [`## ${d}`, "", ...segs.flatMap((seg) => segmentIndex(seg, excerpts))];
+    }),
+  ];
+
+  const staged = `${out}.tmp-${process.pid}`;
+  rmSync(staged, { recursive: true, force: true });
+  mkdirSync(staged, { recursive: true });
+  const { thread, exportedAt } = JSON.parse(readFileSync(join(source, "MANIFEST.json"), "utf-8"));
+  writeFileSync(join(staged, "MANIFEST.json"), `${JSON.stringify({ thread, exportedAt, slice: { fromSeq: from, toSeq: to } }, null, 2)}\n`);
+  writeFileSync(join(staged, "index.md"), `${index.join("\n").trimEnd()}\n`);
+  mkdirSync(join(staged, "chunks"));
+  chunks.forEach((c, i) => {
+    const head = [SLICE_MARK, `# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. It covers every item from seq ${c.from} to ${c.to}, but leaves out reasoning and checkpoints and cuts long text. Read the item at its seq in activity.jsonl for all of it.`, ""];
+    writeFileSync(join(staged, chunkName(i)), `${[...head, ...c.parts].join("\n").trimEnd()}\n`);
+  });
+  rmSync(out, { recursive: true, force: true });
+  renameSync(staged, out);
+  console.log(out);
+  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${to < asked ? `seq ${to + 1}–${asked} still running, left for the next window; ` : ""}${chunks.length} chunk${chunks.length === 1 ? "" : "s"}`);
+}
+
 function cmdMigratePaths() {
   const homes = existsSync(RETRO) ? readdirSync(RETRO).map((n) => join(RETRO, n, "thread.json")) : [];
   const rounds = existsSync(ROUNDS) ? readdirSync(ROUNDS).map((n) => join(ROUNDS, n, "round.json")) : [];
@@ -880,8 +1250,8 @@ function cmdMigratePaths() {
   console.log(`rewrote ${changed.length} of ${rewrites.length} records`);
 }
 
-const FLAGS = new Set(["all", "answered"]);
-const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected"]);
+const FLAGS = new Set(["all", "answered", "long-running", "no-long-running"]);
+const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected", "host", "limbase-thread", "days-allowed", "from-seq", "to-seq", "through-at"]);
 
 function parse(argv) {
   const args = { _: [], trail: [], input: [], model: [] };
@@ -905,7 +1275,7 @@ function parse(argv) {
   return args;
 }
 
-const COMMANDS = { reflect: cmdReflect, register: cmdRegister, status: cmdStatus, open: cmdOpen, close: cmdClose, archive: cmdArchive, backlog: cmdBacklog, remind: cmdRemind, "migrate-paths": cmdMigratePaths };
+const COMMANDS = { reflect: cmdReflect, register: cmdRegister, status: cmdStatus, open: cmdOpen, close: cmdClose, archive: cmdArchive, backlog: cmdBacklog, remind: cmdRemind, slice: cmdSlice, "migrate-paths": cmdMigratePaths };
 
 try {
   const [command, ...rest] = process.argv.slice(2);
@@ -914,7 +1284,7 @@ try {
     process.exit(command ? 1 : 0);
   }
   const args = parse(rest);
-  if (command === "backlog" || process.env.RETRO_LOCKED) COMMANDS[command](args);
+  if (command === "backlog" || command === "slice" || process.env.RETRO_LOCKED) COMMANDS[command](args);
   else underLock([command, ...rest]);
 } catch (err) {
   if (!(err instanceof Refusal)) throw err;
