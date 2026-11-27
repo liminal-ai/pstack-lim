@@ -547,7 +547,10 @@ function renderRegistry(state, at, { secrets, failure }) {
     "## Waiting for a round",
     "",
     ...table(
-      by("waiting").map((t) => `| ${threadLabel(t)} | ${t.project ?? "?"} | ${modelsCell(t)} | ${pendingReflects(t, rounds).map((c) => `\`${c.dir}\``).join("<br>")} | ${decided(t)} | ${trailsCell(t)} |`),
+      by("waiting").map((t) => {
+        const unwindowed = t.longRunning?.active && !freshReflects(t, rounds).length ? "<br>long-running agent: open leaves it out until it has a reflect that names its window" : "";
+        return `| ${threadLabel(t)} | ${t.project ?? "?"} | ${modelsCell(t)} | ${pendingReflects(t, rounds).map((c) => `\`${c.dir}\``).join("<br>")}${unwindowed} | ${decided(t)} | ${trailsCell(t)} |`;
+      }),
       "| thread | project | models | reflects | decisions | trails |",
     ),
     "",
@@ -665,15 +668,28 @@ function firstLine(path, limit) {
   }
 }
 
-// The export's rows always carry these fields: activity.jsonl and children/*.jsonl one shape, messages.jsonl another, children.json a list of subagent records.
+const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+const keysAre = (row, keys) => isObject(row) && Object.keys(row).sort().join() === [...keys].sort().join();
+const strings = (row, keys) => keys.every((k) => typeof row[k] === "string");
+
+// The exact rows retro-export-thread writes, so an ordinary record that only shares some field names is still backed up.
+const EXPORT_ROWS = {
+  activity: (r) => keysAre(r, ["seq", "ordinal", "id", "type", "status", "updatedAt", "item"]) && Number.isInteger(r.seq) && Number.isInteger(r.ordinal) && strings(r, ["id", "type", "status", "updatedAt"]) && isObject(r.item) && r.item.type === r.type,
+  message: (r) => keysAre(r, ["id", "role", "createdAt", "message"]) && strings(r, ["id", "createdAt"]) && ["user", "assistant", "system"].includes(r.role) && isObject(r.message),
+  child: (r) => keysAre(r, ["parent", "id", "childThreadId", "status", "record"]) && strings(r, ["parent", "id", "status"]) && (r.childThreadId === null || typeof r.childThreadId === "string") && isObject(r.record),
+};
+
 function isTranscript(path) {
   try {
     if (path.endsWith(".md")) return firstLine(path, 256) === SLICE_MARK;
-    if (path.endsWith(".json")) return /^\[\s*\{\s*"parent"\s*:\s*"[^"]*"\s*,\s*"id"\s*:/.test(firstLine(path, 256));
+    if (path.endsWith(".json")) {
+      if (!/^\[\s*\{\s*"parent"/.test(firstLine(path, 256))) return false;
+      const records = JSON.parse(readFileSync(path, "utf-8"));
+      return Array.isArray(records) && records.length > 0 && records.every(EXPORT_ROWS.child);
+    }
     if (!path.endsWith(".jsonl")) return false;
     const row = JSON.parse(firstLine(path, 1 << 26));
-    const has = (...keys) => keys.every((k) => k in row);
-    return (typeof row.seq === "number" && has("ordinal", "id", "type", "item")) || has("id", "role", "createdAt", "message");
+    return EXPORT_ROWS.activity(row) || EXPORT_ROWS.message(row);
   } catch {
     return false;
   }
@@ -1073,7 +1089,7 @@ function renderRow(row) {
   if (!kind) return null;
   const text = cut(sliceText(row), kind.cap, kind.oneLine);
   const fail = name === "tool" && failed(row);
-  const line = `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}${fail ? ", failed" : ""}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+  const line = `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}${fail ? ", failed" : ""}${unfinished(row) ? ", still running at export" : ""}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
   const tail = fail ? failureTail(row) : "";
   return tail ? `${line}\n${tail}` : line;
 }

@@ -1431,6 +1431,9 @@ test("slice ends the window before the items still running at its end, and says 
   const index = readFileSync(join(dir, "slice-0-2", "index.md"), "utf-8");
   assert.match(index, /Seq 3–4 were still running at export, so this window ends at seq 2 and the next one starts with them\./);
   assert.match(index, /Still running at export, so read as they were then: seq 1\./);
+  const chunk = readFileSync(join(dir, "slice-0-2", "chunks", "chunk-01.md"), "utf-8");
+  assert.match(chunk, /\[seq 1 09:00 todo list, still running at export\]/, "the chunk alone shows the item was unfinished");
+  assert.match(chunk, /\[seq 2 09:01 agent\] b/);
   assert.match(sliceRun(t, [dir, "--from-seq", "3"]).err, /nothing new to reflect from seq 3: seq 3–4 are still running/);
 });
 
@@ -1662,6 +1665,17 @@ test("an old windowless reflect of a marked agent neither joins nor blocks a due
   assert.deepEqual(JSON.parse(readFileSync(join(opened.out.trim(), "round.json"), "utf-8")).threads, [B]);
 });
 
+test("the registry says a marked agent waiting with only a windowless reflect is left out of open", (t) => {
+  const { run, reflect } = sandbox(t);
+  const dir = run(["reflect", A]).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  run(["register", A, "--reflected", dir, "--title", "steward", "--long-running", "--host", "box"]);
+  reflect(B);
+  const status = run(["status"]).out;
+  assert.match(status, /\| \[steward\][^\n]*<br>long-running agent: open leaves it out until it has a reflect that names its window \|/);
+  assert.doesNotMatch(status.split("\n").find((l) => l.includes("bbbbbbbb")), /long-running agent/);
+});
+
 test("a failed tool call shows as failed with the end of its output; a successful one stays one line", (t) => {
   const dir = writeExport(join(scratchDir(t), "export"), [
     ["command_execution", "2026-11-01T09:00:00Z", { input: "run-checks", output: `${"ok\n".repeat(400)}AssertionError: expected 3, got 2\n`, exitCode: 0, outputIndicatesFailure: true }],
@@ -1711,6 +1725,8 @@ test("the backup holds back export and slice files by what they are, wherever th
   cpSync(join(exportDir, "slice-0-10", "index.md"), join(evidence, "index.md"));
   cpSync(join(exportDir, "slice-0-10", "chunks", "chunk-01.md"), join(evidence, "chunk-01.md"));
   writeFileSync(join(evidence, "events.jsonl"), `${JSON.stringify({ ts: 1, event: "deploy" })}\n`);
+  writeFileSync(join(evidence, "deploys.jsonl"), `${JSON.stringify({ id: "d1", role: "operator", createdAt: "2026-11-01T09:00:00Z", message: "rolled out v2" })}\n`);
+  writeFileSync(join(evidence, "tasks.json"), JSON.stringify([{ parent: "root", id: "t1", title: "ship" }]));
   writeFileSync(join(evidence, "notes.md"), "# Notes\n");
   const docs = join(scratchDir(t), "docs");
   mkdirSync(docs);
@@ -1728,7 +1744,7 @@ test("the backup holds back export and slice files by what they are, wherever th
   const opened = run(["open", "--input", evidence]);
   assert.equal(opened.code, 0, opened.err);
   const files = pushedFiles();
-  for (const keep of ["events.jsonl", "notes.md", `${A}/thread.json`]) assert.ok(files.some((f) => f.endsWith(keep)), `${keep} is backed up`);
+  for (const keep of ["events.jsonl", "deploys.jsonl", "tasks.json", "notes.md", `${A}/thread.json`]) assert.ok(files.some((f) => f.endsWith(keep)), `${keep} is backed up`);
   assert.ok(files.some((f) => f.endsWith("/index.md") && f.includes("docs")), "an ordinary index.md is backed up");
   const leaked = files.filter((f) => /activity\.jsonl|messages\.jsonl|children\.json|child\.jsonl|detached\.jsonl|chunk-01\.md/.test(f) || (f.endsWith("index.md") && !f.includes("docs")));
   assert.deepEqual(leaked, []);
