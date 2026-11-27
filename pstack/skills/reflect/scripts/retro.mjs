@@ -9,13 +9,15 @@ import { fileURLToPath } from "node:url";
 
 const USAGE = `usage: retro.mjs <command>
   reflect <thread-id> [--title T] [--project P]
-  register <thread-id> [--title T] [--project P] [--model PROVIDER/MODEL@FROM]... [--trail PATH]... [--reflected DIR]
+  register <thread-id> [--title T] [--project P] [--model PROVIDER/MODEL@FROM]... [--trail PATH]... [--reflected DIR [--from-seq N --to-seq N --through-at ISO]]
+           [--long-running --host H [--limbase-thread ID] [--days-allowed N] | --no-long-running]
   status
   open [--threads ID,ID] [--input PATH]... [--at YYYY-MM-DD] [--earlier REASON]
   close <round> [--at YYYY-MM-DD]
   archive <round>
   backlog [--all]
   remind [--answered]
+  slice <export-dir> [--from-seq N] [--to-seq N] [--out DIR]
   migrate-paths`;
 
 // t3_thread_launch makes mcp: and a UUID, or mcp:launch: and a SHA-256 hex digest when given a clientRequestId.
@@ -36,6 +38,9 @@ const SELF = "node ~/.agents/skills/reflect/scripts/retro.mjs";
 const ROUND_ID = /^\d{4}-\d{2}-\d{2}(-\d+)?$/;
 const ARCHIVE = resolve(process.env.RETRO_ARCHIVE ?? "/archive/retro");
 const ARCHIVE_KEEP_DAYS = 7;
+const DAYS_ALLOWED = 14;
+// About 75k tokens, so one reader takes a chunk with room to spare. A window that renders larger is split.
+const CHUNK_CHARS = 300000;
 
 class Refusal extends Error {}
 const refuse = (msg) => {
@@ -171,18 +176,52 @@ function statusOf(thread, rounds) {
   return { kind: "no-reflect" };
 }
 
-function dueReason({ threads, rounds }, at) {
+const days = (n) => `${n} day${n === 1 ? "" : "s"}`;
+
+function settledDue({ threads, rounds }, at) {
   const open = rounds.find((r) => !r.closedAt);
   if (open) {
     const openDays = Math.floor((at.getTime() - new Date(open.openedAt).getTime()) / DAY);
-    const reason = `round ${open.round} has been open ${openDays} day${openDays === 1 ? "" : "s"}`;
+    const reason = `round ${open.round} has been open ${days(openDays)}`;
     return { due: openDays >= STALE_ROUND_DAYS, reason: openDays >= STALE_ROUND_DAYS ? `${reason}; finish and close it` : reason };
   }
   const waiting = [...threads.values()].flatMap((t) => pendingReflects(t, rounds)).map((c) => new Date(c.completedAt).getTime());
   if (waiting.length === 0) return { due: false, reason: "no reflects waiting" };
   const ageDays = Math.floor((at.getTime() - Math.min(...waiting)) / DAY);
-  const summary = `${waiting.length} reflect${waiting.length === 1 ? "" : "s"} waiting, oldest ${ageDays} day${ageDays === 1 ? "" : "s"}`;
+  const summary = `${waiting.length} reflect${waiting.length === 1 ? "" : "s"} waiting, oldest ${days(ageDays)}`;
   return { due: waiting.length >= DUE_COUNT || ageDays >= DUE_AGE_DAYS, reason: summary };
+}
+
+function longRunningAgents({ threads, rounds }, at) {
+  return [...threads.values()]
+    .filter((t) => t.longRunning?.active)
+    .map((t) => {
+      const lastRetro = rounds.filter((r) => r.closedAt && r.threads.includes(t.thread)).map((r) => r.closedAt).sort((a, b) => new Date(a) - new Date(b)).at(-1) ?? null;
+      const daysSince = Math.floor((at.getTime() - new Date(lastRetro ?? t.longRunning.markedAt).getTime()) / DAY);
+      const covered = t.reflects.filter((c) => c.window).sort((a, b) => a.window.toSeq - b.window.toSeq).at(-1)?.window ?? null;
+      return { t, lastRetro, daysSince, overdue: daysSince >= t.longRunning.daysAllowed, covered };
+    });
+}
+
+const agentName = (t) => t.title ?? t.thread;
+
+function longRunningSummary(agents) {
+  if (!agents.length) return "no long-running agents marked";
+  const overdue = agents.filter((a) => a.overdue).length;
+  const each = agents.map(({ t, lastRetro, daysSince }) =>
+    lastRetro
+      ? `${agentName(t)}: last retro ${lastRetro.slice(0, 10)}, ${days(daysSince)} ago, ${t.longRunning.daysAllowed} allowed`
+      : `${agentName(t)}: last retro never, marked ${days(daysSince)} ago, ${t.longRunning.daysAllowed} allowed`,
+  );
+  return `long-running agents: ${overdue} of ${agents.length} overdue (${each.join("; ")})`;
+}
+
+// A round is due for settled threads' reflects, or for a long-running agent past its days allowed. While a round is open, only that round can make one due.
+function dueReason(state, at) {
+  const settled = settledDue(state, at);
+  const agents = longRunningAgents(state, at);
+  const open = state.rounds.some((r) => !r.closedAt);
+  return { due: settled.due || (!open && agents.some((a) => a.overdue)), reason: `${settled.reason}; ${longRunningSummary(agents)}` };
 }
 
 function within(path, dir) {
@@ -355,6 +394,42 @@ function threadRecord(id, args, at) {
   return { rec, file, home: join(RETRO, id) };
 }
 
+function wholeNumber(value, flag) {
+  if (!/^\d+$/.test(value)) refuse(`${flag} takes a whole number, got ${value}`);
+  return Number(value);
+}
+
+function markLongRunning(rec, args, at) {
+  const mark = args["long-running"];
+  const details = ["host", "limbase-thread", "days-allowed"].filter((k) => args[k] !== undefined);
+  if (mark && args["no-long-running"]) refuse("pass --long-running or --no-long-running, not both");
+  if (details.length && !mark) refuse(`--${details[0]} goes with --long-running`);
+  if (args["no-long-running"]) {
+    if (rec.longRunning?.active) rec.longRunning = { ...rec.longRunning, active: false, unmarkedAt: stamp(at) };
+    return;
+  }
+  if (!mark) return;
+  const was = rec.longRunning?.active ? rec.longRunning : null;
+  const host = args.host ?? was?.host;
+  if (!host) refuse("--long-running needs --host, the machine whose T3 holds the thread");
+  const daysAllowed = args["days-allowed"] !== undefined ? wholeNumber(args["days-allowed"], "--days-allowed") : (was?.daysAllowed ?? DAYS_ALLOWED);
+  if (daysAllowed < 1) refuse("--days-allowed takes at least 1");
+  rec.longRunning = { active: true, host, limbaseThread: args["limbase-thread"] ?? was?.limbaseThread ?? null, daysAllowed, markedAt: was?.markedAt ?? stamp(at) };
+}
+
+function windowOf(args) {
+  const given = ["from-seq", "to-seq", "through-at"].filter((k) => args[k] !== undefined);
+  if (!given.length) return null;
+  if (!args.reflected) refuse(`--${given[0]} describes a reflect; pass it with --reflected`);
+  if (given.length < 3) refuse("a reflect's window needs --from-seq, --to-seq and --through-at together");
+  const fromSeq = wholeNumber(args["from-seq"], "--from-seq");
+  const toSeq = wholeNumber(args["to-seq"], "--to-seq");
+  if (toSeq < fromSeq) refuse(`--to-seq ${toSeq} is before --from-seq ${fromSeq}`);
+  const through = new Date(args["through-at"]);
+  if (Number.isNaN(through.getTime())) refuse(`--through-at takes an ISO time, got ${args["through-at"]}`);
+  return { fromSeq, toSeq, throughAt: stamp(through) };
+}
+
 function cmdReflect(args) {
   const at = now();
   const { rec, file, home } = threadRecord(args._[0], args, at);
@@ -368,12 +443,15 @@ function cmdReflect(args) {
 function cmdRegister(args) {
   const at = now();
   const { rec, file, home } = threadRecord(args._[0], args, at);
+  markLongRunning(rec, args, at);
   const dir = args.reflected && resolve(args.reflected);
   if (dir && !within(dir, home)) refuse(`--reflected takes a folder inside ${home}, got ${dir}`);
   if (dir && !isFile(join(dir, "synthesis.md"))) refuse(`write the reflect outputs first: ${join(dir, "synthesis.md")} is missing`);
+  const window = windowOf(args);
   const plans = [...new Set(args.trail.map((trail) => resolve(trail)))].map((trail) => planTrail(rec, trail));
   for (const plan of plans) applyTrail(home, rec, plan, at);
   if (dir && !rec.reflects.some((c) => c.dir === dir)) rec.reflects.push({ dir, completedAt: stamp(at) });
+  if (window) rec.reflects.find((c) => c.dir === dir).window = window;
   writeRecord(file, rec);
   save(`register ${rec.thread}`);
   console.log(home);
@@ -449,6 +527,16 @@ function renderRegistry(state, at, { secrets, failure }) {
     ...table(
       by("waiting").map((t) => `| ${threadLabel(t)} | ${t.project ?? "?"} | ${modelsCell(t)} | ${pendingReflects(t, rounds).map((c) => `\`${c.dir}\``).join("<br>")} | ${decided(t)} | ${trailsCell(t)} |`),
       "| thread | project | models | reflects | decisions | trails |",
+    ),
+    "",
+    "## Long-running agents",
+    "",
+    ...table(
+      longRunningAgents(state, at).map(({ t, lastRetro, daysSince, overdue, covered }) => {
+        const position = covered ? `seq ${covered.toSeq}, through ${covered.throughAt}` : "none";
+        return `| ${threadLabel(t)} | ${t.project ?? "?"} | ${t.longRunning.host} | ${t.longRunning.limbaseThread ?? "none"} | ${lastRetro?.slice(0, 10) ?? "never"} | ${daysSince}${overdue ? ", overdue" : ""} | ${t.longRunning.daysAllowed} | ${position} |`;
+      }),
+      "| thread | project | host | Limbase thread | last retro | days since | days allowed | last position covered |",
     ),
     "",
     "## Registered, no reflect yet",
@@ -864,6 +952,177 @@ function cmdRemind(args) {
   console.log(`ASK: ${reason}`);
 }
 
+const SLICE_KINDS = {
+  person: { label: () => "person", cap: 20000 },
+  agent: { label: () => "agent", cap: 20000 },
+  prompt: { label: (it) => (it.senderThreadId ? `from thread ${it.senderThreadId}` : `from ${it.createdBy ?? "?"}`), cap: 4000 },
+  tick: { label: (it) => `scheduled tick ${it.scheduledTaskId}`, cap: 200, oneLine: true },
+  compaction: { label: (it) => `compaction${it.beforeTokenCount ? `, ${it.beforeTokenCount} to ${it.afterTokenCount ?? "?"} tokens` : ""}`, cap: 300, oneLine: true },
+  error: { label: () => "error", cap: 300, oneLine: true },
+  interrupt: { label: (it, type) => type.replaceAll("_", " "), cap: 300, oneLine: true },
+  tool: { label: (it, type) => (type === "dynamic_tool" ? `tool ${it.toolName ?? "?"}` : type === "command_execution" ? `command${it.exitCode !== undefined ? `, exit ${it.exitCode}` : ""}` : type.replaceAll("_", " ")), cap: 300, oneLine: true },
+};
+
+// A user_message is the person's own only when a person wrote it here: not a schedule, and not sent by another thread or an agent.
+function sliceKind(row) {
+  const it = row.item ?? {};
+  if (row.type === "user_message") return it.scheduledTaskId ? "tick" : it.createdBy === "user" && !it.senderThreadId ? "person" : "prompt";
+  if (row.type === "assistant_message") return "agent";
+  if (row.type === "compaction" || row.type === "error") return row.type;
+  if (row.type === "run_interrupt_request" || row.type === "run_interrupt_result") return "interrupt";
+  return row.type === "reasoning" || row.type === "checkpoint" ? null : "tool";
+}
+
+function sliceText(row) {
+  const it = row.item ?? {};
+  if (row.type === "error") return it.failure?.message ?? "";
+  const value = it.text ?? it.input ?? it.message ?? it.title ?? it.fileName ?? "";
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function cut(text, cap, oneLine) {
+  const flat = oneLine ? text.replace(/\s+/g, " ").trim() : text.trim();
+  return flat.length > cap ? `${flat.slice(0, cap)} [cut ${flat.length - cap} characters]` : flat;
+}
+
+const rowTime = (row) => new Date(row.item?.startedAt ?? row.updatedAt);
+
+function renderRow(row) {
+  const kind = SLICE_KINDS[sliceKind(row)];
+  if (!kind) return null;
+  const text = cut(sliceText(row), kind.cap, kind.oneLine);
+  return `[seq ${row.seq} ${stamp(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+}
+
+const epochName = (n) => (n === 0 ? "before the first compaction" : `after compaction ${n}`);
+const seqRange = (seqs) => (seqs.length === 1 ? `seq ${seqs[0]}` : `seq ${seqs[0]}–${seqs.at(-1)}`);
+
+function segmentIndex(seg) {
+  const of = (kind) => seg.rows.filter((r) => sliceKind(r) === kind);
+  const person = of("person");
+  const ticks = Object.entries(Object.groupBy(of("tick"), (r) => r.item.scheduledTaskId));
+  const prompts = of("prompt");
+  const errors = of("error");
+  const interrupts = of("interrupt");
+  const lines = [`### seq ${seg.rows[0].seq}–${seg.rows.at(-1).seq}, ${epochName(seg.epoch)} (${seg.rows.length} items)`, ""];
+  lines.push(`- From the person: ${person.length || "none"}`);
+  for (const r of person) lines.push(`  - seq ${r.seq}, ${stamp(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
+  for (const [task, rows] of ticks) lines.push(`- Scheduled ticks from \`${task}\`: ${rows.length}, ${seqRange(rows.map((r) => r.seq))}`);
+  if (prompts.length) lines.push(`- From other threads or agents: ${prompts.length}, ${seqRange(prompts.map((r) => r.seq))}`);
+  if (errors.length) lines.push(`- Errors at seq ${errors.map((r) => r.seq).join(", ")}`);
+  if (interrupts.length) lines.push(`- Interrupts at seq ${interrupts.map((r) => r.seq).join(", ")}`);
+  return [...lines, ""];
+}
+
+function packChunks(segments) {
+  const chunks = [];
+  let open = null;
+  const add = (heading, lines) => {
+    const size = heading.length + lines.reduce((n, l) => n + l.text.length + 1, 0);
+    if (open && open.size + size > CHUNK_CHARS) open = null;
+    if (!open) chunks.push((open = { size: 0, parts: [], from: lines[0].seq, to: null }));
+    open.parts.push(heading, ...lines.map((l) => l.text), "");
+    open.size += size;
+    open.to = lines.at(-1).seq;
+  };
+  for (const seg of segments) {
+    const heading = `## ${seg.day}, ${epochName(seg.epoch)}\n`;
+    const lines = seg.rows.map((r) => ({ seq: r.seq, text: renderRow(r) })).filter((l) => l.text !== null);
+    let piece = [];
+    let size = heading.length;
+    for (const line of lines) {
+      if (piece.length && size + line.text.length + 1 > CHUNK_CHARS) {
+        add(heading, piece);
+        piece = [];
+        size = heading.length;
+      }
+      piece.push(line);
+      size += line.text.length + 1;
+    }
+    if (piece.length) add(heading, piece);
+  }
+  return chunks;
+}
+
+function ancestors(path) {
+  const up = [];
+  for (let p = dirname(path); p !== dirname(p); p = dirname(p)) up.push(p);
+  return up;
+}
+
+function cmdSlice(args) {
+  const source = resolve(args._[0] ?? refuse("slice needs an export folder or its activity.jsonl"));
+  if (!existsSync(source)) refuse(`not found: ${source}`);
+  const file = statSync(source).isDirectory() ? join(source, "activity.jsonl") : source;
+  if (!isFile(file)) refuse(`${file} is missing; slice reads the activity.jsonl that retro-export-thread writes`);
+  const rows = readFileSync(file, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line, i) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        refuse(`${file} line ${i + 1} is not JSON`);
+      }
+    });
+  rows.forEach((r, i) => r.seq !== i && refuse(`${file} line ${i + 1} has seq ${r.seq}; an export numbers its items from 0 in order`));
+  if (!rows.length) refuse(`${file} has no items`);
+  const last = rows.length - 1;
+  const from = args["from-seq"] !== undefined ? wholeNumber(args["from-seq"], "--from-seq") : 0;
+  const to = args["to-seq"] !== undefined ? wholeNumber(args["to-seq"], "--to-seq") : last;
+  if (to > last) refuse(`--to-seq ${to} is past the export's last item, seq ${last}`);
+  if (to < from) refuse(`--to-seq ${to} is before --from-seq ${from}`);
+
+  const segments = [];
+  let epoch = rows.slice(0, from).filter((r) => r.type === "compaction").length;
+  for (const row of rows.slice(from, to + 1)) {
+    if (row.type === "compaction") epoch++;
+    const d = day(rowTime(row));
+    const seg = segments.at(-1);
+    if (seg && seg.day === d && seg.epoch === epoch) seg.rows.push(row);
+    else segments.push({ day: d, epoch, rows: [row] });
+  }
+  const window = rows.slice(from, to + 1);
+  const count = (kind) => window.filter((r) => sliceKind(r) === kind).length;
+  const rendered = window.map(renderRow).filter((l) => l !== null).reduce((n, l) => n + l.length + 1, 0);
+  const chunks = rendered > CHUNK_CHARS ? packChunks(segments) : [];
+  const throughAt = stamp(rowTime(rows[to]));
+  const out = resolve(args.out ?? join(dirname(file), `slice-${from}-${to}`));
+  // The slice holds transcript text, so in the retro folder it must sit inside an export, which is never pushed.
+  if (within(out, RETRO) && !ancestors(out).some(isExport)) refuse(`--out ${out} is in ${RETRO} but not inside an export, so the backup would push transcript text; put it inside the export folder`);
+  const chunkName = (i) => `chunks/chunk-${String(i + 1).padStart(2, "0")}.md`;
+
+  const index = [
+    `# Window seq ${from}–${to}`,
+    "",
+    `From \`${file}\`: ${window.length} items, ${stamp(rowTime(rows[from]))} to ${throughAt}.`,
+    "",
+    `Register the reflect over it with \`--from-seq ${from} --to-seq ${to} --through-at ${throughAt}\`.`,
+    "",
+    `Totals: ${count("person")} from the person, ${count("tick")} scheduled ticks, ${count("prompt")} from other threads or agents, ${count("compaction")} compactions, ${count("error")} errors, ${count("interrupt")} interrupts.`,
+    "",
+    ...(chunks.length
+      ? [`The window renders to ${rendered} characters, so it is split into ${chunks.length} chunks at day and compaction boundaries:`, "", ...chunks.map((c, i) => `- \`${chunkName(i)}\`: seq ${c.from}–${c.to}`)]
+      : [`The window renders to ${rendered} characters, small enough for one reader, so it has no chunks. Read it from the activity.jsonl lines with seq ${from} to ${to}.`]),
+    "",
+    ...Object.entries(Object.groupBy(segments, (s) => s.day)).flatMap(([d, segs]) => [`## ${d}`, "", ...segs.flatMap(segmentIndex)]),
+  ];
+
+  const staged = `${out}.tmp-${process.pid}`;
+  rmSync(staged, { recursive: true, force: true });
+  mkdirSync(staged, { recursive: true });
+  writeFileSync(join(staged, "index.md"), `${index.join("\n").trimEnd()}\n`);
+  if (chunks.length) mkdirSync(join(staged, "chunks"));
+  chunks.forEach((c, i) => {
+    const head = [`# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. Reasoning and checkpoints are left out, and long text is cut. Read the item at its seq in activity.jsonl for all of it.`, ""];
+    writeFileSync(join(staged, chunkName(i)), `${[...head, ...c.parts].join("\n").trimEnd()}\n`);
+  });
+  rmSync(out, { recursive: true, force: true });
+  renameSync(staged, out);
+  console.log(out);
+  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${chunks.length ? `${chunks.length} chunk${chunks.length === 1 ? "" : "s"}` : "no chunks"}`);
+}
+
 function cmdMigratePaths() {
   const homes = existsSync(RETRO) ? readdirSync(RETRO).map((n) => join(RETRO, n, "thread.json")) : [];
   const rounds = existsSync(ROUNDS) ? readdirSync(ROUNDS).map((n) => join(ROUNDS, n, "round.json")) : [];
@@ -880,8 +1139,8 @@ function cmdMigratePaths() {
   console.log(`rewrote ${changed.length} of ${rewrites.length} records`);
 }
 
-const FLAGS = new Set(["all", "answered"]);
-const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected"]);
+const FLAGS = new Set(["all", "answered", "long-running", "no-long-running"]);
+const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected", "host", "limbase-thread", "days-allowed", "from-seq", "to-seq", "through-at", "out"]);
 
 function parse(argv) {
   const args = { _: [], trail: [], input: [], model: [] };
@@ -905,7 +1164,7 @@ function parse(argv) {
   return args;
 }
 
-const COMMANDS = { reflect: cmdReflect, register: cmdRegister, status: cmdStatus, open: cmdOpen, close: cmdClose, archive: cmdArchive, backlog: cmdBacklog, remind: cmdRemind, "migrate-paths": cmdMigratePaths };
+const COMMANDS = { reflect: cmdReflect, register: cmdRegister, status: cmdStatus, open: cmdOpen, close: cmdClose, archive: cmdArchive, backlog: cmdBacklog, remind: cmdRemind, slice: cmdSlice, "migrate-paths": cmdMigratePaths };
 
 try {
   const [command, ...rest] = process.argv.slice(2);
@@ -914,7 +1173,7 @@ try {
     process.exit(command ? 1 : 0);
   }
   const args = parse(rest);
-  if (command === "backlog" || process.env.RETRO_LOCKED) COMMANDS[command](args);
+  if (command === "backlog" || command === "slice" || process.env.RETRO_LOCKED) COMMANDS[command](args);
   else underLock([command, ...rest]);
 } catch (err) {
   if (!(err instanceof Refusal)) throw err;

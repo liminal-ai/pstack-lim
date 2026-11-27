@@ -10,12 +10,17 @@ Reviewer outputs:
 
 <DIVERGENT_OUTPUT>
 
+When the reflect covers a long-running agent's exported window, check each position in the export's `activity.jsonl`, not with `t3_thread_read`:
+
+<EXPORTED WINDOW IF GIVEN>
+
 For every observation:
 
 - Check its evidence against the transcript. Drop it if the cited moment does not show what it claims, and say so under Dropped.
 - Merge observations of the same incident into one. Count incidents, not reviewers: three reviewers reporting one incident is one incident.
 - Check its classification (bad port, bad application, contradiction, genuine gap). Read the instruction it names before you accept "genuine gap" or "contradiction", because a gap is often an instruction the agent skipped. Correct the classification when the evidence shows another one, and say why.
 - Keep facts about tools and paths when they explain what happened, even if they may drift.
+- When the person corrected the agent sharply, keep it as an incident with its context: what the agent had just done, what consideration was dropped, and whether the agent then swung too far the other way. Propose no rule from it, and if a reviewer stated one, keep the incident and drop the rule. In that moment the person's words are stronger and less exact than what they mean, and they leave out the exceptions the person would allow. The agent also tends to overreact. Working out lasting guidance is the retro round's job, later and with a broader view.
 
 Output exactly the format below. No preamble, no narration.
 
