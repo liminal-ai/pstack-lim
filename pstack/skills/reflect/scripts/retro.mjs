@@ -17,7 +17,7 @@ const USAGE = `usage: retro.mjs <command>
   archive <round>
   backlog [--all]
   remind [--answered]
-  slice <export-dir> [--from-seq N] [--to-seq N] [--out DIR]
+  slice <export-dir> [--from-seq N] [--to-seq N]
   migrate-paths`;
 
 // t3_thread_launch makes mcp: and a UUID, or mcp:launch: and a SHA-256 hex digest when given a clientRequestId.
@@ -185,7 +185,8 @@ function settledDue({ threads, rounds }, at) {
     const reason = `round ${open.round} has been open ${days(openDays)}`;
     return { due: openDays >= STALE_ROUND_DAYS, reason: openDays >= STALE_ROUND_DAYS ? `${reason}; finish and close it` : reason };
   }
-  const waiting = [...threads.values()].flatMap((t) => pendingReflects(t, rounds)).map((c) => new Date(c.completedAt).getTime());
+  const settled = [...threads.values()].filter((t) => !t.longRunning?.active);
+  const waiting = settled.flatMap((t) => pendingReflects(t, rounds)).map((c) => new Date(c.completedAt).getTime());
   if (waiting.length === 0) return { due: false, reason: "no reflects waiting" };
   const ageDays = Math.floor((at.getTime() - Math.min(...waiting)) / DAY);
   const summary = `${waiting.length} reflect${waiting.length === 1 ? "" : "s"} waiting, oldest ${days(ageDays)}`;
@@ -216,7 +217,7 @@ function longRunningSummary(agents) {
   return `long-running agents: ${overdue} of ${agents.length} overdue (${each.join("; ")})`;
 }
 
-// A round is due for settled threads' reflects, or for a long-running agent past its days allowed. While a round is open, only that round can make one due.
+// A round is due for settled threads' reflects, or for a long-running agent past its days allowed; an agent's own reflects count only through its days allowed. While a round is open, only that round can make one due.
 function dueReason(state, at) {
   const settled = settledDue(state, at);
   const agents = longRunningAgents(state, at);
@@ -794,7 +795,11 @@ function cmdOpen(args) {
     if (!t) refuse(`thread ${id} is not registered; run register first`);
     const s = statusOf(t, state.rounds);
     if (s.kind === "retrod") refuse(`thread ${id} was retro'd in round ${s.round} and has not reflected since`);
+    if (t.longRunning?.active && !pendingReflects(t, state.rounds).length) refuse(`${agentName(t)} is a long-running agent with no reflect of its new window; reflect it first, then open the round`);
   }
+  // A long-running agent joins a round only with a fresh reflect, so the default never leaves an overdue one out without saying so.
+  const unreflected = args.threads === undefined && !args.earlier ? longRunningAgents(state, now()).filter((a) => a.overdue && !pendingReflects(a.t, state.rounds).length) : [];
+  if (unreflected.length) refuse(`long-running agent${unreflected.length === 1 ? "" : "s"} ${unreflected.map((a) => agentName(a.t)).join(", ")} ${unreflected.length === 1 ? "is" : "are"} past the days allowed with no reflect of the new window; reflect ${unreflected.length === 1 ? "it" : "them"} first, then open the round, or name the threads to include with --threads`);
   if (ids.length === 0 && !args.earlier) refuse("no threads are waiting; pass --threads to choose some");
   for (const p of args.input) if (!existsSync(p)) refuse(`input not found: ${p}`);
   mkdirSync(ROUNDS, { recursive: true });
@@ -986,12 +991,16 @@ function cut(text, cap, oneLine) {
 }
 
 const rowTime = (row) => new Date(row.item?.startedAt ?? row.updatedAt);
+// Slices bucket and print in UTC, so every machine writes the same files for one export.
+const utc = (date) => date.toISOString().replace(/\.\d{3}Z$/, "Z");
+const UNFINISHED = new Set(["idle", "pending", "running", "waiting"]);
+const unfinished = (row) => UNFINISHED.has(row.status ?? row.item?.status) || row.item?.streaming === true;
 
 function renderRow(row) {
   const kind = SLICE_KINDS[sliceKind(row)];
   if (!kind) return null;
   const text = cut(sliceText(row), kind.cap, kind.oneLine);
-  return `[seq ${row.seq} ${stamp(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
+  return `[seq ${row.seq} ${utc(rowTime(row)).slice(11, 16)} ${kind.label(row.item ?? {}, row.type)}]${text ? (text.includes("\n") ? `\n${text}` : ` ${text}`) : ""}`;
 }
 
 const epochName = (n) => (n === 0 ? "before the first compaction" : `after compaction ${n}`);
@@ -1006,7 +1015,7 @@ function segmentIndex(seg) {
   const interrupts = of("interrupt");
   const lines = [`### seq ${seg.rows[0].seq}–${seg.rows.at(-1).seq}, ${epochName(seg.epoch)} (${seg.rows.length} items)`, ""];
   lines.push(`- From the person: ${person.length || "none"}`);
-  for (const r of person) lines.push(`  - seq ${r.seq}, ${stamp(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
+  for (const r of person) lines.push(`  - seq ${r.seq}, ${utc(rowTime(r)).slice(11, 16)}: ${cut(sliceText(r), 200, true)}`);
   for (const [task, rows] of ticks) lines.push(`- Scheduled ticks from \`${task}\`: ${rows.length}, ${seqRange(rows.map((r) => r.seq))}`);
   if (prompts.length) lines.push(`- From other threads or agents: ${prompts.length}, ${seqRange(prompts.map((r) => r.seq))}`);
   if (errors.length) lines.push(`- Errors at seq ${errors.map((r) => r.seq).join(", ")}`);
@@ -1018,42 +1027,39 @@ function packChunks(segments) {
   const chunks = [];
   let open = null;
   const add = (heading, lines) => {
-    const size = heading.length + lines.reduce((n, l) => n + l.text.length + 1, 0);
+    const size = heading.length + lines.reduce((n, l) => n + (l.text?.length ?? 0) + 1, 0);
     if (open && open.size + size > CHUNK_CHARS) open = null;
     if (!open) chunks.push((open = { size: 0, parts: [], from: lines[0].seq, to: null }));
-    open.parts.push(heading, ...lines.map((l) => l.text), "");
+    open.parts.push(heading, ...lines.map((l) => l.text).filter((text) => text !== null), "");
     open.size += size;
     open.to = lines.at(-1).seq;
   };
   for (const seg of segments) {
     const heading = `## ${seg.day}, ${epochName(seg.epoch)}\n`;
-    const lines = seg.rows.map((r) => ({ seq: r.seq, text: renderRow(r) })).filter((l) => l.text !== null);
+    const lines = seg.rows.map((r) => ({ seq: r.seq, text: renderRow(r) }));
     let piece = [];
     let size = heading.length;
     for (const line of lines) {
-      if (piece.length && size + line.text.length + 1 > CHUNK_CHARS) {
+      if (piece.length && size + (line.text?.length ?? 0) + 1 > CHUNK_CHARS) {
         add(heading, piece);
         piece = [];
         size = heading.length;
       }
       piece.push(line);
-      size += line.text.length + 1;
+      size += (line.text?.length ?? 0) + 1;
     }
     if (piece.length) add(heading, piece);
   }
   return chunks;
 }
 
-function ancestors(path) {
-  const up = [];
-  for (let p = dirname(path); p !== dirname(p); p = dirname(p)) up.push(p);
-  return up;
-}
-
 function cmdSlice(args) {
-  const source = resolve(args._[0] ?? refuse("slice needs an export folder or its activity.jsonl"));
-  if (!existsSync(source)) refuse(`not found: ${source}`);
-  const file = statSync(source).isDirectory() ? join(source, "activity.jsonl") : source;
+  const given = args._[0] ?? refuse("slice needs the export folder that retro-export-thread wrote");
+  if (!existsSync(given)) refuse(`not found: ${given}`);
+  // The slice holds transcript text, and only an export's MANIFEST.json keeps a folder out of the backup, so it is written inside the real export and nowhere else.
+  const source = realpathSync(given);
+  if (!statSync(source).isDirectory() || !isExport(source)) refuse(`${source} is not an export folder with a MANIFEST.json; slice writes only inside the folder retro-export-thread wrote, which is never backed up`);
+  const file = join(source, "activity.jsonl");
   if (!isFile(file)) refuse(`${file} is missing; slice reads the activity.jsonl that retro-export-thread writes`);
   const rows = readFileSync(file, "utf-8")
     .split("\n")
@@ -1069,15 +1075,18 @@ function cmdSlice(args) {
   if (!rows.length) refuse(`${file} has no items`);
   const last = rows.length - 1;
   const from = args["from-seq"] !== undefined ? wholeNumber(args["from-seq"], "--from-seq") : 0;
-  const to = args["to-seq"] !== undefined ? wholeNumber(args["to-seq"], "--to-seq") : last;
-  if (to > last) refuse(`--to-seq ${to} is past the export's last item, seq ${last}`);
-  if (to < from) refuse(`--to-seq ${to} is before --from-seq ${from}`);
+  const asked = args["to-seq"] !== undefined ? wholeNumber(args["to-seq"], "--to-seq") : last;
+  if (asked > last) refuse(`--to-seq ${asked} is past the export's last item, seq ${last}`);
+  // T3 rewrites an item in place until it finishes, so the window ends before the unfinished items at its end and the next window starts with them.
+  let to = asked;
+  while (to >= from && unfinished(rows[to])) to--;
+  if (to < from) refuse(`nothing new to reflect from seq ${from}: ${asked < from ? `the window ends at seq ${asked}` : `seq ${from}–${asked} are still running`}. Nothing is new since the last reflect, so stop here`);
 
   const segments = [];
   let epoch = rows.slice(0, from).filter((r) => r.type === "compaction").length;
   for (const row of rows.slice(from, to + 1)) {
     if (row.type === "compaction") epoch++;
-    const d = day(rowTime(row));
+    const d = utc(rowTime(row)).slice(0, 10);
     const seg = segments.at(-1);
     if (seg && seg.day === d && seg.epoch === epoch) seg.rows.push(row);
     else segments.push({ day: d, epoch, rows: [row] });
@@ -1086,17 +1095,16 @@ function cmdSlice(args) {
   const count = (kind) => window.filter((r) => sliceKind(r) === kind).length;
   const rendered = window.map(renderRow).filter((l) => l !== null).reduce((n, l) => n + l.length + 1, 0);
   const chunks = rendered > CHUNK_CHARS ? packChunks(segments) : [];
-  const throughAt = stamp(rowTime(rows[to]));
-  const out = resolve(args.out ?? join(dirname(file), `slice-${from}-${to}`));
-  // The slice holds transcript text, so in the retro folder it must sit inside an export, which is never pushed.
-  if (within(out, RETRO) && !ancestors(out).some(isExport)) refuse(`--out ${out} is in ${RETRO} but not inside an export, so the backup would push transcript text; put it inside the export folder`);
+  const throughAt = utc(rowTime(rows[to]));
+  const out = join(source, `slice-${from}-${to}`);
   const chunkName = (i) => `chunks/chunk-${String(i + 1).padStart(2, "0")}.md`;
 
   const index = [
     `# Window seq ${from}–${to}`,
     "",
-    `From \`${file}\`: ${window.length} items, ${stamp(rowTime(rows[from]))} to ${throughAt}.`,
+    `From \`${file}\`: ${window.length} items, ${utc(rowTime(rows[from]))} to ${throughAt}. Days and times are UTC.`,
     "",
+    ...(to < asked ? [`Seq ${to + 1}–${asked} were still running at export, so this window ends at seq ${to} and the next one starts with them.`, ""] : []),
     `Register the reflect over it with \`--from-seq ${from} --to-seq ${to} --through-at ${throughAt}\`.`,
     "",
     `Totals: ${count("person")} from the person, ${count("tick")} scheduled ticks, ${count("prompt")} from other threads or agents, ${count("compaction")} compactions, ${count("error")} errors, ${count("interrupt")} interrupts.`,
@@ -1114,13 +1122,13 @@ function cmdSlice(args) {
   writeFileSync(join(staged, "index.md"), `${index.join("\n").trimEnd()}\n`);
   if (chunks.length) mkdirSync(join(staged, "chunks"));
   chunks.forEach((c, i) => {
-    const head = [`# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. Reasoning and checkpoints are left out, and long text is cut. Read the item at its seq in activity.jsonl for all of it.`, ""];
+    const head = [`# Chunk ${i + 1} of ${chunks.length}: seq ${c.from}–${c.to}`, "", `Part of the window seq ${from}–${to} from \`${file}\`. It covers every item from seq ${c.from} to ${c.to}, but leaves out reasoning and checkpoints and cuts long text. Read the item at its seq in activity.jsonl for all of it.`, ""];
     writeFileSync(join(staged, chunkName(i)), `${[...head, ...c.parts].join("\n").trimEnd()}\n`);
   });
   rmSync(out, { recursive: true, force: true });
   renameSync(staged, out);
   console.log(out);
-  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${chunks.length ? `${chunks.length} chunk${chunks.length === 1 ? "" : "s"}` : "no chunks"}`);
+  console.log(`window: --from-seq ${from} --to-seq ${to} --through-at ${throughAt}; ${to < asked ? `seq ${to + 1}–${asked} still running, left for the next window; ` : ""}${chunks.length ? `${chunks.length} chunk${chunks.length === 1 ? "" : "s"}` : "no chunks"}`);
 }
 
 function cmdMigratePaths() {
@@ -1140,7 +1148,7 @@ function cmdMigratePaths() {
 }
 
 const FLAGS = new Set(["all", "answered", "long-running", "no-long-running"]);
-const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected", "host", "limbase-thread", "days-allowed", "from-seq", "to-seq", "through-at", "out"]);
+const OPTIONS = new Set(["title", "project", "model", "trail", "threads", "input", "at", "earlier", "reflected", "host", "limbase-thread", "days-allowed", "from-seq", "to-seq", "through-at"]);
 
 function parse(argv) {
   const args = { _: [], trail: [], input: [], model: [] };

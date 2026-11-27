@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1322,9 +1322,9 @@ test("two reflects over two windows in two rounds: the last retro is the later c
 
   reflectWindow("2026-10-24T09:00:00Z", 100, 250, "2026-10-24T08:00:00Z");
   const waiting = run(["status"], "2026-10-25T09:00:00Z", env).out;
-  assert.match(waiting, /Round due: yes, 1 reflect waiting, oldest 1 day; long-running agents: 1 of 1 overdue \(steward: last retro 2026-10-11, 14 days ago, 14 allowed\)/);
+  assert.match(waiting, /Round due: yes, no reflects waiting; long-running agents: 1 of 1 overdue \(steward: last retro 2026-10-11, 14 days ago, 14 allowed\)/);
   assert.match(waiting, /\| 2026-10-11 \| 14, overdue \| 14 \| seq 250, through 2026-10-24T08:00:00\+00:00 \|/);
-  assert.match(run(["remind"], "2026-10-25T09:00:00Z", env).out, /^ASK: 1 reflect waiting/);
+  assert.match(run(["remind"], "2026-10-25T09:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
   assert.equal(run(["open"], "2026-10-25T10:00:00Z", env).code, 0);
   assert.match(run(["status"], "2026-10-26T09:00:00Z", env).out, /Round due: no, round 2026-10-25 has been open 0 days; long-running agents: 1 of 1 overdue/, "an open round holds back a second ask");
   assert.equal(closeRound("2026-10-25", "2026-10-26T09:00:00Z").code, 0);
@@ -1352,16 +1352,19 @@ const agent = (at, text) => ["assistant_message", at, { text, streaming: false }
 const command = (at) => ["command_execution", at, { input: "git status", output: "clean", exitCode: 0 }];
 const compaction = (at) => ["compaction", at, { driver: "claudeAgent", beforeTokenCount: 900000, afterTokenCount: 40000 }];
 
-function sliceRun(t, args) {
+const running = (at, text) => ["assistant_message", at, { text, streaming: true }];
+const reasoning = (at) => ["reasoning", at, { text: "thinking", streaming: false }];
+
+function sliceRun(t, args, tz = "UTC") {
   const { run } = sandbox(t);
-  return run(["slice", ...args], undefined, { TZ: "UTC" });
+  return run(["slice", ...args], undefined, { TZ: tz });
 }
 
-test("slice maps a small window by day and compaction, keeps the person apart from scheduled ticks, and writes no chunks", (t) => {
-  const dir = writeExport(join(scratchDir(t), "export"), [
+const smallExport = (t) =>
+  writeExport(join(scratchDir(t), "export"), [
     person("2026-11-01T09:00:00Z", "Please set up the nightly job."),
     agent("2026-11-01T09:01:00Z", "Done."),
-    ["reasoning", "2026-11-01T09:01:30Z", { text: "hidden", streaming: false }],
+    reasoning("2026-11-01T09:01:30Z"),
     command("2026-11-01T09:02:00Z"),
     tick("2026-11-01T10:00:00Z"),
     tick("2026-11-01T11:00:00Z"),
@@ -1371,61 +1374,95 @@ test("slice maps a small window by day and compaction, keeps the person apart fr
     person("2026-11-02T08:00:00Z", "No, stop that. Ask me before you restart services."),
     tick("2026-11-02T09:00:00Z"),
   ]);
+
+test("slice maps a small window by day and compaction, keeps the person apart from scheduled ticks, and writes no chunks", (t) => {
+  const dir = smallExport(t);
   const r = sliceRun(t, [dir]);
   assert.equal(r.code, 0, r.err);
   const out = join(dir, "slice-0-10");
-  assert.equal(r.out, `${out}\nwindow: --from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00+00:00; no chunks\n`);
+  assert.equal(r.out, `${out}\nwindow: --from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z; no chunks\n`);
   assert.ok(!existsSync(join(out, "chunks")));
   const index = readFileSync(join(out, "index.md"), "utf-8");
   assert.match(index, /^# Window seq 0–10\n/);
-  assert.match(index, /Register the reflect over it with `--from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00\+00:00`/);
+  assert.match(index, /Days and times are UTC\./);
+  assert.match(index, /Register the reflect over it with `--from-seq 0 --to-seq 10 --through-at 2026-11-02T09:00:00Z`/);
   assert.match(index, /Totals: 2 from the person, 3 scheduled ticks, 1 from other threads or agents, 1 compactions, 1 errors, 0 interrupts\./);
   assert.match(index, /## 2026-11-01\n\n### seq 0–5, before the first compaction \(6 items\)\n\n- From the person: 1\n  - seq 0, 09:00: Please set up the nightly job\.\n- Scheduled ticks from `scheduled-task:[^`]+`: 2, seq 4–5\n/);
   assert.match(index, /### seq 6–8, after compaction 1 \(3 items\)\n\n- From the person: none\n- From other threads or agents: 1, seq 7\n- Errors at seq 8\n/);
   assert.match(index, /## 2026-11-02\n\n### seq 9–10, after compaction 1 \(2 items\)\n\n- From the person: 1\n  - seq 9, 08:00: No, stop that\. Ask me before you restart services\.\n- Scheduled ticks from `[^`]+`: 1, seq 10\n/);
 });
 
-test("slice of a later window numbers compactions from the start of the export and refuses a window past its end", (t) => {
+test("slice writes the same files whatever the machine's timezone", (t) => {
+  const dir = smallExport(t);
+  assert.equal(sliceRun(t, [dir], "Pacific/Kiritimati").code, 0);
+  const east = readFileSync(join(dir, "slice-0-10", "index.md"), "utf-8");
+  assert.equal(sliceRun(t, [dir], "America/Los_Angeles").code, 0);
+  assert.equal(readFileSync(join(dir, "slice-0-10", "index.md"), "utf-8"), east);
+});
+
+test("slice of a later window numbers compactions from the start of the export, and an empty or reversed window has nothing new", (t) => {
   const dir = writeExport(join(scratchDir(t), "export"), [person("2026-11-01T09:00:00Z", "a"), compaction("2026-11-01T10:00:00Z"), compaction("2026-11-01T11:00:00Z"), person("2026-11-01T12:00:00Z", "b"), agent("2026-11-01T12:01:00Z", "c")]);
-  const r = sliceRun(t, [join(dir, "activity.jsonl"), "--from-seq", "3"]);
+  const r = sliceRun(t, [dir, "--from-seq", "3"]);
   assert.equal(r.code, 0, r.err);
   assert.match(readFileSync(join(dir, "slice-3-4", "index.md"), "utf-8"), /### seq 3–4, after compaction 2 \(2 items\)/);
   assert.match(sliceRun(t, [dir, "--to-seq", "5"]).err, /past the export's last item, seq 4/);
-  assert.match(sliceRun(t, [dir, "--from-seq", "4", "--to-seq", "3"]).err, /before --from-seq/);
+  assert.match(sliceRun(t, [dir, "--from-seq", "5"]).err, /nothing new to reflect from seq 5: the window ends at seq 4\. Nothing is new since the last reflect, so stop here/);
+  assert.match(sliceRun(t, [dir, "--from-seq", "4", "--to-seq", "3"]).err, /nothing new to reflect from seq 4/);
 });
 
-test("slice splits a large window into bounded chunks at day and compaction boundaries, the same way every time", (t) => {
+test("slice ends the window before the items still running at its end, and says where the next window starts", (t) => {
+  const dir = writeExport(join(scratchDir(t), "export"), [
+    person("2026-11-01T09:00:00Z", "a"),
+    ["todo_list", "2026-11-01T09:00:10Z", { steps: [] }],
+    agent("2026-11-01T09:01:00Z", "b"),
+    running("2026-11-01T09:02:00Z", "half a reply"),
+    command("2026-11-01T09:03:00Z"),
+  ]);
+  const rows = readFileSync(join(dir, "activity.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  rows[1].status = "running";
+  rows[4].status = "running";
+  writeFileSync(join(dir, "activity.jsonl"), `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`);
+  const r = sliceRun(t, [dir]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /window: --from-seq 0 --to-seq 2 --through-at 2026-11-01T09:01:00Z; seq 3–4 still running, left for the next window; no chunks\n$/, "an unfinished item before a finished one stays in the window");
+  assert.match(readFileSync(join(dir, "slice-0-2", "index.md"), "utf-8"), /Seq 3–4 were still running at export, so this window ends at seq 2 and the next one starts with them\./);
+  assert.match(sliceRun(t, [dir, "--from-seq", "3"]).err, /nothing new to reflect from seq 3: seq 3–4 are still running/);
+});
+
+test("slice splits a large window into chunks at day and compaction boundaries that cover every seq, the same way every time", (t) => {
   const long = (n) => `${"word ".repeat(15000)}${n}`;
   const entries = [];
   const starts = [];
   for (const [d, hasCompaction] of [["2026-11-01", false], ["2026-11-02", true], ["2026-11-03", false], ["2026-11-04", true]]) {
     starts.push(entries.length);
-    if (hasCompaction) entries.push(compaction(`${d}T08:00:00Z`));
+    entries.push(reasoning(`${d}T07:00:00Z`));
+    if (hasCompaction) starts.push(entries.push(compaction(`${d}T08:00:00Z`)) - 1);
     for (let i = 0; i < 2; i++) entries.push(person(`${d}T09:0${i}:00Z`, long(i)), agent(`${d}T09:0${i}:30Z`, long(i)), command(`${d}T09:0${i}:40Z`), tick(`${d}T09:0${i}:50Z`));
+    entries.push(reasoning(`${d}T10:00:00Z`));
   }
   const dir = writeExport(join(scratchDir(t), "export"), entries);
-  const first = sliceRun(t, [dir, "--out", join(dir, "a")]);
+  const out = join(dir, `slice-0-${entries.length - 1}`);
+  const first = sliceRun(t, [dir]);
   assert.equal(first.code, 0, first.err);
-  const chunks = readdirSync(join(dir, "a", "chunks")).sort();
+  const chunks = readdirSync(join(out, "chunks")).sort();
   assert.ok(chunks.length >= 2, `${chunks.length} chunks`);
   assert.match(first.out, new RegExp(`; ${chunks.length} chunks\n$`));
   const covered = [];
-  for (const name of chunks) {
-    const text = readFileSync(join(dir, "a", "chunks", name), "utf-8");
-    assert.ok(text.length < 300000 + 1000, `${name} is ${text.length} characters`);
+  const texts = chunks.map((name) => readFileSync(join(out, "chunks", name), "utf-8"));
+  texts.forEach((text, i) => {
+    assert.ok(text.length < 300000 + 1000, `${chunks[i]} is ${text.length} characters`);
     const [, from, to] = new RegExp(`^# Chunk \\d of ${chunks.length}: seq (\\d+)–(\\d+)\n`).exec(text);
-    assert.ok(starts.includes(Number(from)), `${name} starts at seq ${from}, a day or compaction boundary`);
+    assert.ok(starts.includes(Number(from)), `${chunks[i]} starts at seq ${from}, a day or compaction boundary`);
+    assert.match(text, new RegExp(`It covers every item from seq ${from} to ${to}`));
     covered.push([Number(from), Number(to)]);
     assert.doesNotMatch(text, /\[seq \d+ [\d:]+ agent\]\n(word ){15001}/, "long text is cut");
-  }
+  });
   assert.equal(covered[0][0], 0);
   assert.equal(covered.at(-1)[1], entries.length - 1);
-  for (let i = 1; i < covered.length; i++) assert.equal(covered[i][0], covered[i - 1][1] + 1, "chunks cover the window in order with no gap");
-  assert.match(readFileSync(join(dir, "a", "index.md"), "utf-8"), /split into \d chunks at day and compaction boundaries:\n\n- `chunks\/chunk-01\.md`: seq 0–/);
-  assert.equal(sliceRun(t, [dir, "--out", join(dir, "b")]).code, 0);
-  for (const name of ["index.md", ...chunks.map((c) => `chunks/${c}`)]) {
-    assert.equal(readFileSync(join(dir, "b", name), "utf-8"), readFileSync(join(dir, "a", name), "utf-8"), `${name} is the same on a second run`);
-  }
+  for (let i = 1; i < covered.length; i++) assert.equal(covered[i][0], covered[i - 1][1] + 1, "chunk ranges meet even where a left-out reasoning row sits at the edge");
+  assert.match(readFileSync(join(out, "index.md"), "utf-8"), /split into \d chunks at day and compaction boundaries:\n\n- `chunks\/chunk-01\.md`: seq 0–/);
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  assert.deepEqual(readdirSync(join(out, "chunks")).sort().map((name) => readFileSync(join(out, "chunks", name), "utf-8")), texts, "a rerun writes the same chunks");
 });
 
 test("slice splits one day too big for a chunk between items", (t) => {
@@ -1441,9 +1478,84 @@ test("slice splits one day too big for a chunk between items", (t) => {
   }
 });
 
-test("slice refuses to write transcript text in the retro folder outside an export", (t) => {
-  const { store, run } = sandbox(t);
-  const exportDir = writeExport(join(store, "retro", A, "trails", "export"), [person("2026-11-01T09:00:00Z", "a")]);
-  assert.match(run(["slice", exportDir, "--out", join(store, "retro", A, "slice")]).err, /not inside an export/);
-  assert.equal(run(["slice", exportDir]).code, 0, "the default lands inside the export");
+test("slice reads only an export folder, takes no --out, and writes inside the real export through a symlink", (t) => {
+  const plain = join(scratchDir(t), "plain");
+  mkdirSync(plain);
+  writeFileSync(join(plain, "activity.jsonl"), readFileSync(join(smallExport(t), "activity.jsonl")));
+  assert.match(sliceRun(t, [plain]).err, /is not an export folder with a MANIFEST\.json/);
+  const dir = smallExport(t);
+  assert.match(sliceRun(t, [join(dir, "activity.jsonl")]).err, /is not an export folder/);
+  assert.match(sliceRun(t, [dir, "--out", join(scratchDir(t), "elsewhere")]).err, /unknown option --out/);
+  const link = join(scratchDir(t), "link");
+  symlinkSync(dir, link);
+  const r = sliceRun(t, [link]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out.split("\n")[0], join(realpathSync(dir), "slice-0-10"));
+  assert.ok(!existsSync(join(link, "..", "slice-0-10")));
+});
+
+test("a rerun replaces only its own slice folder", (t) => {
+  const dir = smallExport(t);
+  mkdirSync(join(dir, "slice-0-10", "chunks"), { recursive: true });
+  writeFileSync(join(dir, "slice-0-10", "chunks", "stale.md"), "old\n");
+  mkdirSync(join(dir, "slice-0-9"));
+  writeFileSync(join(dir, "slice-0-9", "index.md"), "another window\n");
+  writeFileSync(join(dir, "notes.md"), "mine\n");
+  const before = readFileSync(join(dir, "activity.jsonl"), "utf-8");
+  assert.equal(sliceRun(t, [dir]).code, 0);
+  assert.deepEqual(readdirSync(join(dir, "slice-0-10")), ["index.md"]);
+  assert.equal(readFileSync(join(dir, "slice-0-9", "index.md"), "utf-8"), "another window\n");
+  assert.equal(readFileSync(join(dir, "notes.md"), "utf-8"), "mine\n");
+  assert.equal(readFileSync(join(dir, "activity.jsonl"), "utf-8"), before);
+  assert.ok(existsSync(join(dir, "MANIFEST.json")));
+});
+
+test("a slice never reaches the backup, whether sliced before the export is registered or after", (t) => {
+  const { store, run, record, inRetro } = sandbox(t);
+  const { pushed, pushedFiles } = backedUp(t, store);
+  const outside = smallExport(t);
+  assert.equal(run(["slice", outside], undefined, { TZ: "UTC" }).code, 0);
+  assert.equal(run(["register", A, "--trail", outside]).code, 0);
+  const copy = inRetro(record(A).trails[0].path);
+  assert.ok(existsSync(join(copy, "slice-0-10", "index.md")), "the copied trail holds the slice");
+  assert.equal(run(["slice", copy, "--from-seq", "9"], undefined, { TZ: "UTC" }).code, 0);
+  assert.equal(run(["register", A, "--title", "steward"]).code, 0);
+  assert.ok(pushed().length >= 2);
+  const files = pushedFiles();
+  assert.ok(files.includes(`${A}/thread.json`));
+  assert.deepEqual(files.filter((f) => /slice-|activity\.jsonl|MANIFEST\.json/.test(f)), []);
+});
+
+test("a long-running agent's own waiting reflect does not trip the settled-thread rules; only its days allowed does", (t) => {
+  const { run } = sandbox(t);
+  const env = { TZ: "UTC" };
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box", "--days-allowed", "30"], "2026-10-01T09:00:00Z", env);
+  for (let i = 0; i < 3; i++) {
+    const dir = run(["reflect", A], "2026-10-01T10:00:00Z", env).out.trim();
+    writeFileSync(join(dir, "synthesis.md"), "x\n");
+    run(["register", A, "--reflected", dir], "2026-10-01T10:00:00Z", env);
+  }
+  assert.match(run(["status"], "2026-10-09T10:00:00Z", env).out, /Round due: no, no reflects waiting; long-running agents: 0 of 1 overdue/, "three reflects a week old");
+  assert.match(run(["remind"], "2026-10-31T10:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
+});
+
+test("an overdue long-running agent joins a round only after a fresh reflect, with or without --threads", (t) => {
+  const { run, reflect, closeRound } = sandbox(t);
+  const env = { TZ: "UTC" };
+  run(["register", A, "--title", "steward", "--long-running", "--host", "box"], "2026-10-01T09:00:00Z", env);
+  assert.match(run(["remind"], "2026-10-16T09:00:00Z", env).out, /^ASK: no reflects waiting; long-running agents: 1 of 1 overdue/);
+  assert.match(run(["open"], "2026-10-16T09:10:00Z", env).err, /long-running agent steward is past the days allowed with no reflect of the new window; reflect it first, then open the round/);
+  assert.match(run(["open", "--threads", A], "2026-10-16T09:10:00Z", env).err, /steward is a long-running agent with no reflect of its new window; reflect it first/);
+  reflect(B, "2026-10-16T09:20:00Z");
+  assert.match(run(["open"], "2026-10-16T09:30:00Z", env).err, /reflect it first, then open the round, or name the threads to include with --threads/, "a waiting settled thread does not let the default leave the agent out");
+  assert.match(run(["status"], "2026-10-16T09:30:00Z", env).out, /## Rounds\n\nNone\./, "a refused open leaves no round");
+  const dir = run(["reflect", A], "2026-10-16T09:40:00Z", env).out.trim();
+  writeFileSync(join(dir, "synthesis.md"), "x\n");
+  assert.equal(run(["register", A, "--reflected", dir, "--from-seq", "0", "--to-seq", "40", "--through-at", "2026-10-16T09:00:00Z"], "2026-10-16T09:40:00Z", env).code, 0);
+  const opened = run(["open"], "2026-10-16T10:00:00Z", env);
+  assert.equal(opened.code, 0, opened.err);
+  const round = JSON.parse(readFileSync(join(opened.out.trim(), "round.json"), "utf-8"));
+  assert.deepEqual(round.threads.sort(), [A, B].sort());
+  assert.equal(closeRound("2026-10-16", "2026-10-17T09:00:00Z").code, 0);
+  assert.match(run(["status"], "2026-10-18T09:00:00Z", env).out, /long-running agents: 0 of 1 overdue \(steward: last retro 2026-10-17, 1 day ago, 14 allowed\)/);
 });
